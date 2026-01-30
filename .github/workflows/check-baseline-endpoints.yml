@@ -1,0 +1,39 @@
+name: Check Baseline Endpoints
+
+on:
+  workflow_dispatch:
+    inputs:
+      owner:
+        description: 'GitHub organization/owner name'
+        required: true
+        type: string
+      destination_endpoint:
+        description: 'Endpoint to search for (e.g., bun.sh:443)'
+        required: false
+        type: string
+        default: 'registry.npmjs.org:443'
+
+jobs:
+  check-endpoints:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Make script executable
+        run: chmod +x scripts/check_baseline_endpoints.sh
+
+      - name: Run baseline endpoint check
+        run: |
+          ./scripts/check_baseline_endpoints.sh \
+            "${{ inputs.owner }}" \
+            "${{ secrets.API_KEY }}" \
+            "baseline_results.csv" \
+            "${{ inputs.destination_endpoint }}"
+
+      - name: Upload results as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: baseline-endpoint-results
+          path: baseline_results.csv
+          retention-days: 30
