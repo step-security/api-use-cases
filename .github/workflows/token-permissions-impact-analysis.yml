@@ -1,0 +1,175 @@
+name: Token Permissions Impact Analysis
+
+on:
+  workflow_dispatch:
+    inputs:
+      owner:
+        description: 'GitHub organization or user to analyze'
+        required: false
+        default: 'actions-security-demo'
+        type: string
+  schedule:
+    # Run daily at 10 AM UTC
+    - cron: '0 10 * * *'
+
+jobs:
+  analyze-token-impact:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Fetch Jobs Without Explicit Token Permissions
+        id: fetch-jobs
+        run: |
+          # Set owner (use input if provided, otherwise use default)
+          OWNER="${{ inputs.owner || 'actions-security-demo' }}"
+          echo "Analyzing owner: $OWNER"
+
+          # Fetch jobs that don't have token permissions explicitly set
+          response=$(curl -s -X 'GET' \
+            "https://agent.api.stepsecurity.io/v1/github/${OWNER}/%5Ball%5D/actions/controls/GithubTokenShouldHaveMinPermission" \
+            -H 'accept: application/json' \
+            -H "Authorization: Bearer ${{ secrets.API_KEY }}")
+
+          # Filter only jobs with status "Failed" (no explicit permissions)
+          filtered_response=$(echo "$response" | jq '[.[] | select(.status == "Failed")]')
+
+          echo "Sample of jobs without explicit token permissions:"
+          echo "$filtered_response" | jq '.[0:5]'  # Show first 5 entries for preview
+
+          # Save filtered response to file
+          echo "$filtered_response" > jobs-without-permissions.json
+
+          # Count total jobs
+          TOTAL_JOBS=$(echo "$filtered_response" | jq 'length')
+          echo "Total jobs without explicit token permissions: $TOTAL_JOBS"
+          echo "TOTAL_JOBS=$TOTAL_JOBS" >> $GITHUB_ENV
+
+      - name: Fetch Baseline Permissions for Each Repo
+        id: fetch-baselines
+        run: |
+          # Set owner
+          OWNER="${{ inputs.owner || 'actions-security-demo' }}"
+
+          # Extract unique repos from jobs without permissions
+          REPOS=$(jq -r '.[].repo' jobs-without-permissions.json | sort -u)
+
+          echo "Fetching baselines for unique repositories..."
+          echo "$REPOS"
+
+          # Create empty array for all baselines
+          echo "[]" > all-baselines.json
+
+          # Fetch baseline for each repo
+          for repo in $REPOS; do
+            echo "Fetching baseline for: $repo"
+            baseline=$(curl -s -X 'GET' \
+              "https://agent.api.stepsecurity.io/v1/github/${OWNER}/${repo}/jobs/baseline" \
+              -H 'accept: application/json' \
+              -H "Authorization: Bearer ${{ secrets.API_KEY }}")
+
+            # Check if baseline is valid and not null/empty
+            if echo "$baseline" | jq -e 'type == "array" and length > 0' > /dev/null 2>&1; then
+              # Append to all-baselines.json
+              echo "$baseline" | jq -c '.[]' >> baselines-temp.jsonl
+            else
+              echo "  Warning: No baseline data available for $repo (skipping)"
+            fi
+          done
+
+          # Convert JSONL to JSON array
+          if [ -f baselines-temp.jsonl ]; then
+            jq -s '.' baselines-temp.jsonl > all-baselines.json
+            rm baselines-temp.jsonl
+          fi
+
+          echo "Total baseline entries fetched: $(jq 'length' all-baselines.json)"
+
+      - name: Analyze Impact of Changing Default to contents:read
+        id: analyze-impact
+        run: |
+          # For each job without explicit permissions, check if it needs more than contents:read
+
+          # Create a script to match jobs and analyze impact
+          cat > analyze.jq <<'EOF'
+          # Load both files and match on workflow + job name
+          def load_baselines: . as $jobs
+            | (input | map({key: (.workflow_file_name + "#" + .job), value: .job_token_permissions}) | from_entries) as $baselines
+            | $jobs | map(
+                . as $job
+                | ($job.workflow + "#" + $job.job) as $key
+                | $baselines[$key] as $perms
+                | . + {
+                    baseline_permissions: $perms,
+                    would_be_impacted: (
+                      if ($perms == null or $perms == {} or ($perms | length) == 0) then "Potentially Impacted"
+                      elif $perms == {"contents": "read"} then "No"
+                      else "Yes"
+                      end
+                    )
+                  }
+              );
+          load_baselines
+          EOF
+
+          # Run the analysis
+          jq -f analyze.jq jobs-without-permissions.json all-baselines.json > impact-analysis.json
+
+          # Count impacted jobs
+          IMPACTED=$(jq '[.[] | select(.would_be_impacted == "Yes")] | length' impact-analysis.json)
+          NOT_IMPACTED=$(jq '[.[] | select(.would_be_impacted == "No")] | length' impact-analysis.json)
+          POTENTIALLY_IMPACTED=$(jq '[.[] | select(.would_be_impacted == "Potentially Impacted")] | length' impact-analysis.json)
+
+          echo "=== Impact Analysis Results ==="
+          echo "Jobs that WOULD be impacted: $IMPACTED"
+          echo "Jobs that would NOT be impacted: $NOT_IMPACTED"
+          echo "Jobs POTENTIALLY impacted (no baseline data): $POTENTIALLY_IMPACTED"
+          echo ""
+          echo "IMPACTED_COUNT=$IMPACTED" >> $GITHUB_ENV
+          echo "NOT_IMPACTED_COUNT=$NOT_IMPACTED" >> $GITHUB_ENV
+          echo "POTENTIALLY_IMPACTED_COUNT=$POTENTIALLY_IMPACTED" >> $GITHUB_ENV
+
+      - name: Print Detailed Impact Report
+        run: |
+          echo "=========================================="
+          echo "DETAILED IMPACT REPORT"
+          echo "=========================================="
+          echo ""
+
+          # Print impacted jobs
+          echo "=== JOBS THAT WOULD BE IMPACTED ==="
+          jq -r '.[] | select(.would_be_impacted == "Yes") |
+            "Repo: \(.repo)\nWorkflow: \(.workflow)\nJob: \(.job)\nRecommended Permissions: \(.baseline_permissions)\nJob URL: \(.jobHTMLURL)\n---"' \
+            impact-analysis.json
+
+          echo ""
+          echo "=== JOBS POTENTIALLY IMPACTED (No Baseline Data) ==="
+          jq -r '.[] | select(.would_be_impacted == "Potentially Impacted") |
+            "Repo: \(.repo)\nWorkflow: \(.workflow)\nJob: \(.job)\nBaseline Permissions: Not Available\nJob URL: \(.jobHTMLURL)\n---"' \
+            impact-analysis.json
+
+          echo ""
+          echo "=== JOBS THAT WOULD NOT BE IMPACTED ==="
+          jq -r '.[] | select(.would_be_impacted == "No") |
+            "Repo: \(.repo)\nWorkflow: \(.workflow)\nJob: \(.job)\nBaseline Permissions: \(.baseline_permissions)\nJob URL: \(.jobHTMLURL)\n---"' \
+            impact-analysis.json
+
+          echo ""
+          echo "=========================================="
+          echo "SUMMARY"
+          echo "=========================================="
+          echo "Would be impacted: ${{ env.IMPACTED_COUNT }}"
+          echo "Potentially impacted: ${{ env.POTENTIALLY_IMPACTED_COUNT }}"
+          echo "Would NOT be impacted: ${{ env.NOT_IMPACTED_COUNT }}"
+
+      - name: Upload Analysis Results as Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: token-permissions-impact-analysis
+          path: |
+            jobs-without-permissions.json
+            all-baselines.json
+            impact-analysis.json
+          retention-days: 90
