@@ -13,12 +13,21 @@ on:
         type: string
         default: 'registry.npmjs.org:443'
 
+permissions: {}
+
 jobs:
   check-endpoints:
+    permissions:
+      contents: read  # for actions/checkout to fetch code
     runs-on: ubuntu-latest
     steps:
+      - name: Harden the runner (Audit all outbound calls)
+        uses: step-security/harden-runner@e3f713f2d8f53843e71c69a996d56f51aa9adfb9 # v2.14.1
+        with:
+          egress-policy: audit
+
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
 
       - name: Make script executable
         run: chmod +x scripts/check_baseline_endpoints.sh
@@ -32,7 +41,7 @@ jobs:
             "${{ inputs.destination_endpoint }}"
 
       - name: Upload results as artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: baseline-endpoint-results
           path: baseline_results.csv
