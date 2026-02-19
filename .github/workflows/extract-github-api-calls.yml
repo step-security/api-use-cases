@@ -1,0 +1,51 @@
+name: Extract GitHub API Calls from Workflow Run
+
+on:
+  workflow_dispatch:
+    inputs:
+      owner:
+        description: 'GitHub organization/owner name'
+        required: true
+        type: string
+      repo:
+        description: 'Repository name'
+        required: true
+        type: string
+      run_id:
+        description: 'Workflow run ID'
+        required: true
+        type: string
+
+permissions: {}
+
+jobs:
+  extract-api-calls:
+    permissions:
+      contents: read  # for actions/checkout to fetch code
+    runs-on: ubuntu-latest
+    steps:
+      - name: Harden the runner (Audit all outbound calls)
+        uses: step-security/harden-runner@e3f713f2d8f53843e71c69a996d56f51aa9adfb9 # v2.14.1
+        with:
+          egress-policy: audit
+
+      - name: Checkout repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - name: Make script executable
+        run: chmod +x scripts/extract_github_api_calls.sh
+
+      - name: Extract GitHub API calls
+        run: |
+          ./scripts/extract_github_api_calls.sh \
+            "${{ inputs.owner }}" \
+            "${{ inputs.repo }}" \
+            "${{ inputs.run_id }}" \
+            "${{ secrets.API_KEY }}"
+
+      - name: Upload results as artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: github-api-calls-${{ inputs.run_id }}
+          path: github-api-calls/
+          retention-days: 30
