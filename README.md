@@ -23,4 +23,15 @@ Analyzes the impact of restricting GitHub Actions token permissions across an or
 - What are the minimal required permissions for each job?
 - How to implement least-privilege access without breaking workflows
 
-Both workflows output structured data that can be used for reporting, compliance tracking, and making informed security decisions.
+### 3. Extract GitHub API Calls from Workflow Run
+**Workflow:** `.github/workflows/extract-github-api-calls.yml`
+
+Extracts all GitHub API calls (`api.github.com`) made by jobs in a specific workflow run. This is useful for:
+- Auditing which GitHub API endpoints are called during CI/CD
+- Detecting unexpected API calls (e.g., writing to repos outside the organization)
+- Understanding the API footprint of GitHub Actions workflows
+- Identifying API calls flagged with security detections (e.g., "Write to different Owner")
+
+The workflow produces one CSV per job containing the step name, tool, HTTP method, API path, timestamp, and any associated detection info.
+
+All workflows output structured data that can be used for reporting, compliance tracking, and making informed security decisions.
