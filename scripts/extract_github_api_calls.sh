@@ -56,24 +56,23 @@ for i in $(seq 0 $((JOB_COUNT - 1))); do
 
     echo "Processing job: $JOB_NAME (ID: $JOB_ID)"
 
-    # Extract GitHub API calls (to api.github.com) from all steps and tools
+    # Extract GitHub API calls (to api.github.com and github.com) from all steps and tools
     echo "$RESPONSE" | jq -r --argjson idx "$i" '
         .jobs[$idx] as $job |
-        ["step_name","step_number","tool_name","method","path","timestamp","detection_id","detection_name"],
+        ["step_name","step_number","tool_name","method","host","path","timestamp"],
         (
             $job.steps[]? as $step |
             $step.tools[]? as $tool |
             $tool.https_endpoints[]? |
-            select(.host == "api.github.com") |
+            select(.host == "api.github.com" or .host == "github.com") |
             [
                 $step.name,
                 ($step.number | tostring),
                 $tool.name,
                 .method,
+                .host,
                 .path,
-                .timestamp,
-                (.detection.id // ""),
-                (.detection.name // "")
+                .timestamp
             ]
         ) | @csv
     ' > "$CSV_FILE"
