@@ -1,0 +1,48 @@
+name: Harden Runner Compliance Report
+
+on:
+  workflow_dispatch:
+    inputs:
+      org:
+        description: 'GitHub organization name'
+        required: true
+        type: string
+      failed_only:
+        description: 'Only include non-compliant jobs'
+        required: false
+        type: boolean
+        default: false
+
+permissions: {}
+
+jobs:
+  compliance-report:
+    permissions:
+      contents: read  # for actions/checkout to fetch code
+    runs-on: ubuntu-latest
+    steps:
+      - name: Harden the runner (Audit all outbound calls)
+        uses: step-security/harden-runner@e3f713f2d8f53843e71c69a996d56f51aa9adfb9 # v2.14.1
+        with:
+          egress-policy: audit
+
+      - name: Checkout repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - name: Make script executable
+        run: chmod +x scripts/harden_runner_compliance.sh
+
+      - name: Generate compliance report
+        run: |
+          ARGS="--org ${{ inputs.org }} --token ${{ secrets.API_KEY }} --output harden_runner_report.csv"
+          if [[ "${{ inputs.failed_only }}" == "true" ]]; then
+            ARGS="$ARGS --failed-only"
+          fi
+          ./scripts/harden_runner_compliance.sh $ARGS
+
+      - name: Upload results as artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: harden-runner-compliance-report
+          path: harden_runner_report.csv
+          retention-days: 30
