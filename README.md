@@ -34,4 +34,15 @@ Extracts all GitHub API calls (`api.github.com`) made by jobs in a specific work
 
 The workflow produces one CSV per job containing the step name, tool, HTTP method, API path, timestamp, and any associated detection info.
 
+### 4. Harden Runner Compliance Report
+**Workflow:** `.github/workflows/harden-runner-compliance.yml`
+
+Generates a CSV compliance report showing which workflow jobs across a GitHub organization are monitored by Harden Runner. This helps answer:
+- Which jobs have Harden Runner enabled (passed) vs missing (failed)?
+- Are there any archived repos still appearing in compliance checks?
+- What is the overall Harden Runner adoption rate across the org?
+- Which repos need attention to achieve full compliance?
+
+The report covers both GitHub-hosted and self-hosted runner controls, marks archived repos, and provides a summary with per-repo failure counts.
+
 All workflows output structured data that can be used for reporting, compliance tracking, and making informed security decisions.
