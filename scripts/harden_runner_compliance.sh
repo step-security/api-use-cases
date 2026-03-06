@@ -61,8 +61,8 @@ for CONTROL in "${CONTROLS[@]}"; do
   echo "Fetching ${CONTROL} for org '${ORG}'..."
 
   RESPONSE=$(curl -s -w "\n%{http_code}" \
-    -H "Authorization: Bearer $TOKEN" \
-    "${BASE_URL}/github/${ORG}/[all]/actions/controls/${CONTROL}")
+    -H "Authorization: $TOKEN" \
+    "${BASE_URL}/github/${ORG}/%5Ball%5D/actions/controls/${CONTROL}")
 
   HTTP_CODE=$(echo "$RESPONSE" | tail -1)
   BODY=$(echo "$RESPONSE" | sed '$d')
