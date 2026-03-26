@@ -46,3 +46,14 @@ Generates a CSV compliance report showing which workflow jobs across a GitHub or
 The report covers both GitHub-hosted and self-hosted runner controls, marks archived repos, and provides a summary with per-repo failure counts.
 
 All workflows output structured data that can be used for reporting, compliance tracking, and making informed security decisions.
+
+### 5. Actions in Use CSV Report
+**Workflow:** `.github/workflows/actions-list-csv-basic.yml`
+
+Generates a CSV report of all GitHub Actions in use across your organization(s), similar to what you see in the 'actions in use' tab in the dashboard. This helps answer:
+- What actions are currently in use across my org?
+- Which actions have the lowest security scores?
+- How many repos are using each action?
+
+This script requires your tenant name. You can find this under the Admin Console URL: `app.stepsecurity.io/<TENANT_NAME>/admin-console`
+> For a more detailed actions report including full action details, please reach out to the StepSecurity team.
