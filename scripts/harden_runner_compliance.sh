@@ -6,7 +6,7 @@
 # across a GitHub org are missing harden-runner.
 #
 # Usage:
-#   ./harden_runner_compliance.sh --org <github-org> --token <stepsecurity-bearer-token> [--failed-only] [--output <file.csv>]
+#   ./harden_runner_compliance.sh --org <github-org> --token <stepsecurity-bearer-token> [--failed-only] [--output <file.csv>] [--parallel <n>]
 #
 # Requirements: curl, jq
 
@@ -16,16 +16,18 @@ BASE_URL="https://agent.api.stepsecurity.io/v1"
 CONTROLS=("GitHubHostedRunnerShouldBeHardened" "SelfHostedRunnerShouldBeHardened")
 OUTPUT="harden_runner_report.csv"
 FAILED_ONLY=false
+PARALLEL=100
 ORG=""
 TOKEN=""
 
 usage() {
-  echo "Usage: $0 --org <org> --token <stepsecurity-token> [--failed-only] [--output <file>]"
+  echo "Usage: $0 --org <org> --token <stepsecurity-token> [--failed-only] [--output <file>] [--parallel <n>]"
   echo ""
   echo "  --org          GitHub organization name"
   echo "  --token        StepSecurity API bearer token"
   echo "  --failed-only  Only include non-compliant jobs"
   echo "  --output       Output CSV file (default: harden_runner_report.csv)"
+  echo "  --parallel     Number of concurrent API requests (default: 100)"
   exit 1
 }
 
@@ -35,6 +37,7 @@ while [[ $# -gt 0 ]]; do
     --token)      TOKEN="$2"; shift 2 ;;
     --failed-only) FAILED_ONLY=true; shift ;;
     --output)     OUTPUT="$2"; shift 2 ;;
+    --parallel)   PARALLEL="$2"; shift 2 ;;
     *)            usage ;;
   esac
 done
@@ -43,13 +46,63 @@ if [[ -z "$ORG" || -z "$TOKEN" ]]; then
   usage
 fi
 
-# ── 1. Fetch control data from StepSecurity API ─────────────────────
+# ── 1. Set up working directory ────────────────────────────────────
 
 TMPDIR_WORK=$(mktemp -d)
 trap 'rm -rf "$TMPDIR_WORK"' EXIT
 
 ALL_CHECKS="$TMPDIR_WORK/all_checks.json"
 echo "[]" > "$ALL_CHECKS"
+
+# ── 2. Fetch repository list ──────────────────────────────────────
+
+echo "Fetching repository list for '${ORG}'..."
+
+REPOS_RESPONSE=$(curl -s -w "\n%{http_code}" \
+  -H "Authorization: $TOKEN" \
+  "${BASE_URL}/github/${ORG}/actions/security-summary")
+
+HTTP_CODE=$(echo "$REPOS_RESPONSE" | tail -1)
+REPOS_BODY=$(echo "$REPOS_RESPONSE" | sed '$d')
+
+if [[ "$HTTP_CODE" -ne 200 ]]; then
+  echo "Error: HTTP $HTTP_CODE fetching repository list" >&2
+  exit 1
+fi
+
+echo "$REPOS_BODY" | jq -r '.[].Repo | select(. != "#all#")' > "$TMPDIR_WORK/repos.txt"
+REPO_COUNT=$(wc -l < "$TMPDIR_WORK/repos.txt" | tr -d ' ')
+echo "Found $REPO_COUNT repositories"
+
+# ── 3. Create helper script for parallel per-repo fetching ────────
+
+cat > "$TMPDIR_WORK/fetch_control.sh" << 'HELPER_EOF'
+#!/usr/bin/env bash
+REPO="$1"
+CONTROL="$2"
+BASE_URL="$3"
+ORG="$4"
+TOKEN="$5"
+OUTDIR="$6"
+
+RESPONSE=$(curl -s -w "\n%{http_code}" \
+  -H "Authorization: $TOKEN" \
+  "${BASE_URL}/github/${ORG}/${REPO}/actions/controls/${CONTROL}" 2>/dev/null)
+
+HTTP_CODE=$(echo "$RESPONSE" | tail -1)
+BODY=$(echo "$RESPONSE" | sed '$d')
+
+if [[ "$HTTP_CODE" -eq 200 ]]; then
+  ENTRY_COUNT=$(echo "$BODY" | jq 'length' 2>/dev/null || echo "0")
+  if [[ "$ENTRY_COUNT" -gt 0 ]]; then
+    SAFE_NAME=$(echo "${REPO}" | sed 's/[^a-zA-Z0-9._-]/_/g')
+    echo "$BODY" > "${OUTDIR}/${SAFE_NAME}.json"
+  fi
+fi
+HELPER_EOF
+chmod +x "$TMPDIR_WORK/fetch_control.sh"
+
+# ── 4. Fetch control data per repo in parallel ────────────────────
 
 for CONTROL in "${CONTROLS[@]}"; do
   if [[ "$CONTROL" == "SelfHostedRunnerShouldBeHardened" ]]; then
@@ -58,51 +111,56 @@ for CONTROL in "${CONTROLS[@]}"; do
     RUNNER_TYPE="GitHub-Hosted"
   fi
 
-  echo "Fetching ${CONTROL} for org '${ORG}'..."
+  CONTROL_DIR="$TMPDIR_WORK/$CONTROL"
+  mkdir -p "$CONTROL_DIR"
 
-  RESPONSE=$(curl -s -w "\n%{http_code}" \
-    -H "Authorization: $TOKEN" \
-    "${BASE_URL}/github/${ORG}/%5Ball%5D/actions/controls/${CONTROL}")
+  echo ""
+  echo "Fetching ${CONTROL} across ${REPO_COUNT} repos (${PARALLEL} parallel)..."
 
-  HTTP_CODE=$(echo "$RESPONSE" | tail -1)
-  BODY=$(echo "$RESPONSE" | sed '$d')
+  tr '\n' '\0' < "$TMPDIR_WORK/repos.txt" | \
+    xargs -0 -P "$PARALLEL" -I {} \
+    "$TMPDIR_WORK/fetch_control.sh" {} "$CONTROL" "$BASE_URL" "$ORG" "$TOKEN" "$CONTROL_DIR"
 
-  if [[ "$HTTP_CODE" -ne 200 ]]; then
-    echo "  Error: HTTP $HTTP_CODE fetching $CONTROL" >&2
-    continue
+  # Merge all per-repo JSON files for this control
+  shopt -s nullglob
+  REPO_FILES=("$CONTROL_DIR"/*.json)
+  shopt -u nullglob
+
+  if [[ ${#REPO_FILES[@]} -gt 0 ]]; then
+    MERGED=$(jq -s 'add' "${REPO_FILES[@]}")
+    ENTRY_COUNT=$(echo "$MERGED" | jq 'length')
+    echo "  Found $ENTRY_COUNT job entries from ${#REPO_FILES[@]} repos"
+
+    TRANSFORMED=$(echo "$MERGED" | jq --arg control "$CONTROL" \
+      --arg runner_type "$RUNNER_TYPE" \
+      --argjson failed_only "$FAILED_ONLY" '
+      [.[] | {
+        repo: (.repo // ""),
+        workflow: (.workflow // ""),
+        job: (.job // ""),
+        control: $control,
+        runner_type: $runner_type,
+        status: (.status // ""),
+        job_labels: ((.jobLabels // []) | join(", ")),
+        workflow_url: (.workflowHTMLURL // ""),
+        job_url: (.jobHTMLURL // ""),
+        first_failed: (.firstFailedCheckTimeStamp // ""),
+        last_failed: (.mostRecentFailedCheckTimeStamp // ""),
+        last_checked: (.checkTimeStamp // "")
+      }]
+      | if $failed_only then [.[] | select(.status == "Failed")]
+        else .
+        end
+    ')
+
+    ALL_MERGED=$(jq -s '.[0] + .[1]' "$ALL_CHECKS" <(echo "$TRANSFORMED"))
+    echo "$ALL_MERGED" > "$ALL_CHECKS"
+  else
+    echo "  Found 0 job entries"
   fi
-
-  ENTRY_COUNT=$(echo "$BODY" | jq 'length')
-  echo "  Found $ENTRY_COUNT job entries"
-
-  TRANSFORMED=$(echo "$BODY" | jq --arg control "$CONTROL" \
-    --arg runner_type "$RUNNER_TYPE" \
-    --argjson failed_only "$FAILED_ONLY" '
-    [.[] | {
-      repo: (.repo // ""),
-      workflow: (.workflow // ""),
-      job: (.job // ""),
-      control: $control,
-      runner_type: $runner_type,
-      status: (.status // ""),
-      job_labels: ((.jobLabels // []) | join(", ")),
-      workflow_url: (.workflowHTMLURL // ""),
-      job_url: (.jobHTMLURL // ""),
-      first_failed: (.firstFailedCheckTimeStamp // ""),
-      last_failed: (.mostRecentFailedCheckTimeStamp // ""),
-      last_checked: (.checkTimeStamp // "")
-    }]
-    | if $failed_only then [.[] | select(.status == "Failed")]
-      else .
-      end
-  ')
-
-  # Merge into all_checks
-  MERGED=$(jq -s '.[0] + .[1]' "$ALL_CHECKS" <(echo "$TRANSFORMED"))
-  echo "$MERGED" > "$ALL_CHECKS"
 done
 
-# ── 2. Sort and write CSV ────────────────────────────────────────────
+# ── 5. Sort and write CSV ────────────────────────────────────────────
 
 TOTAL=$(jq 'length' "$ALL_CHECKS")
 
@@ -124,7 +182,7 @@ jq -r '
 echo ""
 echo "Wrote $TOTAL entries to $OUTPUT"
 
-# ── 3. Summary ───────────────────────────────────────────────────────
+# ── 6. Summary ───────────────────────────────────────────────────────
 
 SUMMARY=$(jq '
   {
