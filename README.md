@@ -90,19 +90,30 @@ The report covers both GitHub-hosted and self-hosted runner controls and provide
 ### 5. Actions in Use Detailed CSV Report
 **Workflow:** `.github/workflows/actions-list-csv-basic.yml`
 
-Generates a detailed CSV report of all GitHub Actions in use across your organization(s), including security scores, repository lists, outbound network calls, and — when available — a **StepSecurity-maintained drop-in replacement** for the action. This helps answer:
+Produces **two complementary CSVs** in a single run:
+
+1. **`workflow_actions_detailed.csv`** — one row per unique action (the "is this action safe to approve?" view).
+2. **`workflow_actions_usage.csv`** — one row per `<action × repo × workflow>` usage (the "where do I need to bump or pin?" view).
+
+Together they cover security scores, repository lists, outbound network calls, **StepSecurity-maintained drop-in replacements**, pin type (SHA / tag / branch), version drift vs. the latest release, and last-execution recency. This helps answer:
 - What actions are currently in use across my org?
 - Which actions have the lowest security scores?
 - **Is there a StepSecurity-maintained alternative I can swap in for a risky third-party action?** (`maintained_action_name` column)
 - How many repos are using each action, and which repos specifically?
 - What outbound network endpoints do these actions call?
 - Are actions well-maintained, with branch protection and security policies?
+- **Which usages are SHA-pinned vs. tag-only vs. branch-tracking?** (`pin_type` column)
+- **Which usages are running an outdated version, and how far behind?** (`is_latest` / `days_behind_latest` columns)
+- **Are dormant workflows still wired to risky actions?** (`last_executed_days_ago` column)
+- **Which usages are inside a reusable workflow (so a fix has multiplier impact)?** (`reusable_workflow` column)
 
-> 💡 **Maintained-action highlight:** the `maintained_action_name` column is populated whenever StepSecurity publishes a hardened, regularly updated equivalent of the action (e.g. `tj-actions/changed-files` → `step-security/changed-files`). An empty value means no StepSecurity-maintained alternative exists for that action today. Filtering the CSV on rows where this column is non-empty gives you an instant, prioritized migration list.
+> 💡 **Maintained-action column:** the `maintained_action_name` column is populated whenever StepSecurity publishes a hardened, regularly updated equivalent of the action (e.g. `tj-actions/changed-files` → `step-security/changed-files`). An empty value means no StepSecurity-maintained alternative exists for that action today. Filtering the CSV on rows where this column is non-empty gives you an instant, prioritized migration list.
 
 This script requires your tenant name. You can find this under the Admin Console URL: `app.stepsecurity.io/<TENANT_NAME>/admin-console`
 
-**Example output** (selected columns; the full CSV has 30+ columns including per-dimension score breakdowns and reasons):
+#### `workflow_actions_detailed.csv` — one row per action
+
+(Selected columns; the full CSV has 30+ columns including per-dimension score breakdowns and reasons.)
 
 | owner        | action_name                    | workflow_count | repo_count | repositories                                  | overall_score | maintained_score | security_policy_score | vulnerabilities_score | maintained_action_name              | outbound_endpoints                                |
 |--------------|--------------------------------|----------------|------------|-----------------------------------------------|---------------|------------------|------------------------|------------------------|--------------------------------------|---------------------------------------------------|
@@ -111,5 +122,27 @@ This script requires your tenant name. You can find this under the Admin Console
 | example-org  | tj-actions/changed-files       | 18             | 11         | api-gateway, frontend-web-app, ...            | 7             | 6                | 5                      | 7                      | **step-security/changed-files**      | api.github.com (GitHub API)                       |
 | example-org  | some-vendor/legacy-deploy      | 6              | 3          | legacy-svc, internal-tooling, infra-tests     | 3             | 2                | 0                      | 4                      |                                      | deploy.example.vendor.com                         |
 | example-org  | docker/build-push-action       | 22             | 14         | api-gateway, ml-training, infra-tests, ...    | 8             | 9                | 8                      | 8                      |                                      | registry-1.docker.io, ghcr.io                     |
+
+#### `workflow_actions_usage.csv` — one row per `<action × repo × workflow>` usage
+
+This CSV is what you sort and filter to drive cleanup. It exposes pin type, version drift, and last-execution recency — none of which appear in the per-action CSV. Real-world signal from a single org of ~180 actions: ~1,300 usage rows, ~44% SHA-pinned vs. ~56% tag-only, ~93% running a non-latest version. The `days_behind_latest` column lets you sort the riskiest usages first.
+
+(Selected columns; the full CSV also includes `branch`, `pinned_sha`, `version_release_date`, `latest_release_date`, `last_run_id`, and `workflow_url`.)
+
+| owner       | action_name                | repo              | workflow                              | pin_type | pinned_tag | is_latest | latest_version | days_behind_latest | last_executed | last_executed_days_ago | runner_labels             | reusable_workflow                              |
+|-------------|----------------------------|-------------------|---------------------------------------|----------|------------|-----------|----------------|---------------------|---------------|--------------------------|---------------------------|------------------------------------------------|
+| example-org | actions/checkout           | api-gateway       | .github/workflows/codeql.yml          | sha      | v4.3.1     | false     | v6.0.2         | 56                  | 2026-04-21    | 5                        | ubuntu-latest             |                                                |
+| example-org | actions/checkout           | frontend-web-app  | .github/workflows/release.yml         | tag      | v6         | true      | v6.0.2         | 0                   | 2026-04-23    | 3                        | ubuntu-latest             |                                                |
+| example-org | actions/checkout           | docs-site         | .github/workflows/audit_package.yml   | sha      | v4.2.2     | false     | v6.0.2         | 444                 | 2026-04-22    | 4                        | ubuntu-latest             | .github/workflows/audit_fix.yml                |
+| example-org | tj-actions/changed-files   | infra-tests       | .github/workflows/lint.yml            | tag      | v44        | false     | v50            | 559                 | 2026-04-15    | 11                       | ubuntu-latest             |                                                |
+| example-org | some-vendor/legacy-deploy  | legacy-svc        | .github/workflows/deploy.yml          | branch   |            | false     | v3             |                     | 2026-03-14    | 43                       | self-hosted, linux        | .github/workflows/legacy-pipeline.yml          |
+| example-org | docker/build-push-action   | ml-training       | .github/workflows/build.yml           | sha      | v6.7.0     | true      | v6.7.0         | 0                   | 2026-04-25    | 1                        | self-hosted, linux, gpu   |                                                |
+
+**Filter idioms this unlocks:**
+- **SHA-pinning audit:** `pin_type != "sha"` → every place not commit-pinned.
+- **Migration backlog:** `is_latest = false` sorted by `days_behind_latest` desc → biggest version drift first.
+- **Dormant + risky combo:** `last_executed_days_ago > 90 AND <action on a known-risky list>` → workflows still wired to risky actions but rarely running.
+- **Reusable-workflow blast radius:** filter `reusable_workflow != ""` and group by it → single fixes that unblock many callers.
+- **Cross-reference with maintained alternatives:** join on `action_name` against `workflow_actions_detailed.csv` rows where `maintained_action_name` is non-empty → a concrete usage list to migrate to StepSecurity-maintained replacements.
 
 All workflows output structured data that can be used for reporting, compliance tracking, and making informed security decisions.

@@ -33,7 +33,7 @@ jobs:
 
       - name: List workflow actions
         run: |
-          ARGS="--tenant ${{ inputs.tenant }} --token ${{ secrets.API_KEY }} --output workflow_actions_detailed.csv"
+          ARGS="--tenant ${{ inputs.tenant }} --token ${{ secrets.API_KEY }} --output workflow_actions_detailed.csv --usage-output workflow_actions_usage.csv"
           if [[ -n "${{ inputs.org }}" ]]; then
             ARGS="$ARGS --org ${{ inputs.org }}"
           fi
@@ -43,5 +43,7 @@ jobs:
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: workflow-actions-detailed-${{ inputs.tenant }}
-          path: workflow_actions_detailed.csv
+          path: |
+            workflow_actions_detailed.csv
+            workflow_actions_usage.csv
           retention-days: 30

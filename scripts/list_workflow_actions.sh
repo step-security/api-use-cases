@@ -15,27 +15,31 @@ set -euo pipefail
 
 API_BASE="https://agent.api.stepsecurity.io/v1"
 OUTPUT="workflow_actions_detailed.csv"
+USAGE_OUTPUT="workflow_actions_usage.csv"
 TENANT=""
 TOKEN=""
 ORG=""
 
 usage() {
-  echo "Usage: $0 --tenant <tenant> --token <stepsecurity-token> [--org <org>] [--output <file>]"
+  echo "Usage: $0 --tenant <tenant> --token <stepsecurity-token> [--org <org>] [--output <file>] [--usage-output <file>]"
   echo ""
-  echo "  --tenant       StepSecurity tenant identifier"
-  echo "  --token        StepSecurity API bearer token"
-  echo "  --org          GitHub organization name (default: all orgs)"
-  echo "  --output       Output CSV file (default: workflow_actions_detailed.csv)"
+  echo "  --tenant         StepSecurity tenant identifier"
+  echo "  --token          StepSecurity API bearer token"
+  echo "  --org            GitHub organization name (default: all orgs)"
+  echo "  --output         Per-action CSV file (default: workflow_actions_detailed.csv)"
+  echo "  --usage-output   Per-usage CSV file with one row per (action × repo × workflow)"
+  echo "                   (default: workflow_actions_usage.csv)"
   exit 1
 }
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --tenant)     TENANT="$2"; shift 2 ;;
-    --token)      TOKEN="$2"; shift 2 ;;
-    --org)        ORG="$2"; shift 2 ;;
-    --output)     OUTPUT="$2"; shift 2 ;;
-    *)            usage ;;
+    --tenant)        TENANT="$2"; shift 2 ;;
+    --token)         TOKEN="$2"; shift 2 ;;
+    --org)           ORG="$2"; shift 2 ;;
+    --output)        OUTPUT="$2"; shift 2 ;;
+    --usage-output)  USAGE_OUTPUT="$2"; shift 2 ;;
+    *)               usage ;;
   esac
 done
 
@@ -104,8 +108,8 @@ get_action_details() {
   fi
 }
 
-# --- Helper: fetch repositories using a specific action ---
-get_action_repositories() {
+# --- Helper: fetch raw workflow-actions response (per-usage data) ---
+get_action_usage_raw() {
   local action_name="$1"
   local owner="$2"
 
@@ -120,27 +124,113 @@ get_action_repositories() {
   body=$(echo "$response" | sed '$d')
 
   if [ "$http_code" -eq 200 ]; then
-    echo "$body" | jq -r '
-      if type == "array" then
-        [.[] | if type == "object" then (.repo // .repository // .name // empty) elif type == "string" then . else empty end]
-      elif type == "object" then
-        (
-          (.repositories // .repos // .data // .result // null) as $arr
-          | if $arr != null and ($arr | type) == "array" then
-              [$arr[] | if type == "object" then (.repo // .repository // .name // empty) elif type == "string" then . else empty end]
-            elif .repo != null then [.repo]
-            else []
-            end
-        )
-      else
-        []
-      end
-      | unique
-      | join(", ")
-    ' 2>/dev/null || echo ""
+    echo "$body"
   else
-    echo ""
+    echo "[]"
   fi
+}
+
+# --- Helper: from raw workflow-actions response, return comma-separated repo list ---
+extract_repo_list() {
+  local body="$1"
+  echo "$body" | jq -r '
+    if type == "array" then
+      [.[] | if type == "object" then (.repo // .repository // .name // empty) elif type == "string" then . else empty end]
+    elif type == "object" then
+      (
+        (.repositories // .repos // .data // .result // null) as $arr
+        | if $arr != null and ($arr | type) == "array" then
+            [$arr[] | if type == "object" then (.repo // .repository // .name // empty) elif type == "string" then . else empty end]
+          elif .repo != null then [.repo]
+          else []
+          end
+      )
+    else
+      []
+    end
+    | unique
+    | join(", ")
+  ' 2>/dev/null || echo ""
+}
+
+# --- Helper: from raw workflow-actions response, append per-usage CSV rows to file ---
+append_usage_rows() {
+  local body="$1"
+  local out_file="$2"
+
+  echo "$body" | jq -r '
+    (if type == "array" then . else [] end)
+    | .[]
+    | . as $u
+    | (
+        if (($u.tag_and_sha.sha // "") | tostring | length) > 0 then "sha"
+        elif (($u.tag_and_sha.tag // "") | tostring | length) > 0 then "tag"
+        elif (($u.branch // "") | tostring | length) > 0 then "branch"
+        else "none"
+        end
+      ) as $pin_type
+    | (
+        if (($u.release_details.releaseDate // 0)) > 0 then
+          ($u.release_details.releaseDate | strftime("%Y-%m-%d"))
+        else "" end
+      ) as $version_release_date
+    | (
+        if (($u.release_details.latestReleaseDate // 0)) > 0 then
+          ($u.release_details.latestReleaseDate | strftime("%Y-%m-%d"))
+        else "" end
+      ) as $latest_release_date
+    | (
+        if (($u.release_details.releaseDate // 0)) > 0
+           and (($u.release_details.latestReleaseDate // 0)) > 0 then
+          (($u.release_details.latestReleaseDate - $u.release_details.releaseDate) / 86400 | floor | tostring)
+        else "" end
+      ) as $days_behind
+    | (
+        if (($u.last_execution_time // 0)) > 0 then
+          ($u.last_execution_time | strftime("%Y-%m-%d"))
+        else "" end
+      ) as $last_executed
+    | (
+        if (($u.last_execution_time // 0)) > 0 then
+          ((now - $u.last_execution_time) / 86400 | floor | tostring)
+        else "" end
+      ) as $last_executed_days_ago
+    | (($u.labels // []) | join(", ")) as $runner_labels
+    | (
+        ($u.reusable_workflows // [])
+        | map(.reusable_workflow // empty)
+        | map(select(. != ""))
+        | unique
+        | join(", ")
+      ) as $reusable_workflow
+    | (
+        if (($u.repo_url // "") | length) > 0 and (($u.workflow // "") | length) > 0 then
+          "\($u.repo_url)/blob/\(($u.branch // "main"))/\($u.workflow)"
+        else "" end
+      ) as $workflow_url
+    | [
+        ($u.owner // ""),
+        ($u.action // ""),
+        ($u.repo // ""),
+        ($u.workflow // ""),
+        ($u.branch // ""),
+        $pin_type,
+        ($u.tag_and_sha.tag // ""),
+        ($u.tag_and_sha.sha // ""),
+        ($u.release_details.isLatest // false | tostring),
+        ($u.release_details.latestVersion // ""),
+        $version_release_date,
+        $latest_release_date,
+        $days_behind,
+        $last_executed,
+        $last_executed_days_ago,
+        $runner_labels,
+        $reusable_workflow,
+        ($u.last_run_id // "" | tostring),
+        $workflow_url
+      ]
+    | @csv
+  ' 2>/dev/null >> "$out_file" || true
 }
 
 # --- Step 1: Determine organizations ---
@@ -250,9 +340,12 @@ fi
 echo ""
 echo "Found ${TOTAL_ACTIONS} actions. Fetching detailed information..."
 
-# --- Step 3: Write CSV header ---
+# --- Step 3: Write CSV headers ---
 CSV_HEADER="owner,action_name,workflow_count,repo_count,repositories,labels,base_score,overall_score,popularity_score,maintained_score,security_policy_score,vulnerabilities_score,branch_protection_score,vulnerabilities_details,vulnerabilities_reason,security_policy_details,security_policy_reason,branch_protection_details,branch_protection_reason,maintained_reason,maintained_details,stargazers_count,license,action_type,description,repo_url,score_last_updated,popularity_usage,popularity_reason,maintained_action_name,outbound_endpoints"
 echo "$CSV_HEADER" > "$OUTPUT"
+
+USAGE_CSV_HEADER="owner,action_name,repo,workflow,branch,pin_type,pinned_tag,pinned_sha,is_latest,latest_version,version_release_date,latest_release_date,days_behind_latest,last_executed,last_executed_days_ago,runner_labels,reusable_workflow,last_run_id,workflow_url"
+echo "$USAGE_CSV_HEADER" > "$USAGE_OUTPUT"
 
 # --- Step 4: For each action, fetch details + repos and write a CSV row ---
 PROCESSED=0
@@ -274,9 +367,11 @@ echo "$ALL_ACTIONS_JSON" | jq -c '.[]' | while IFS= read -r action_json; do
   # Fetch action details
   details=$(get_action_details "$action_name" "$owner")
 
-  # Fetch repository list
-  echo "      - Fetching repository list..."
-  repositories=$(get_action_repositories "$action_name" "$owner")
+  # Fetch usage data (one call, used to derive both repo list and per-usage CSV rows)
+  echo "      - Fetching usage data..."
+  usage_raw=$(get_action_usage_raw "$action_name" "$owner")
+  repositories=$(extract_repo_list "$usage_raw")
+  append_usage_rows "$usage_raw" "$USAGE_OUTPUT"
 
   # Count unique repos
   if [ -n "$repositories" ]; then
@@ -369,6 +464,8 @@ done
 
 # --- Summary ---
 num_rows=$(tail -n +2 "$OUTPUT" | wc -l | tr -d ' ')
+num_usage_rows=$(tail -n +2 "$USAGE_OUTPUT" | wc -l | tr -d ' ')
 echo ""
-echo "Successfully processed ${num_rows} actions."
-echo "Detailed results written to '${OUTPUT}'."
+echo "Successfully processed ${num_rows} actions (${num_usage_rows} usage rows)."
+echo "Per-action detail written to '${OUTPUT}'."
+echo "Per-usage detail written to '${USAGE_OUTPUT}'."
