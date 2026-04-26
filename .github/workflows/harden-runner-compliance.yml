@@ -3,9 +3,13 @@ name: Harden Runner Compliance Report
 on:
   workflow_dispatch:
     inputs:
+      tenant:
+        description: 'StepSecurity tenant name (used when org is empty to report across all orgs)'
+        required: false
+        type: string
       org:
-        description: 'GitHub organization name'
-        required: true
+        description: 'GitHub organization name (leave empty to report across all orgs in the tenant)'
+        required: false
         type: string
       failed_only:
         description: 'Only include non-compliant jobs'
@@ -32,9 +36,22 @@ jobs:
       - name: Make script executable
         run: chmod +x scripts/harden_runner_compliance.sh
 
+      - name: Validate inputs
+        run: |
+          if [[ -z "${{ inputs.tenant }}" && -z "${{ inputs.org }}" ]]; then
+            echo "Error: at least one of 'tenant' or 'org' must be provided." >&2
+            exit 1
+          fi
+
       - name: Generate compliance report
         run: |
-          ARGS="--org ${{ inputs.org }} --token ${{ secrets.API_KEY }} --output harden_runner_report.csv"
+          ARGS="--token ${{ secrets.API_KEY }} --output harden_runner_report.csv"
+          if [[ -n "${{ inputs.tenant }}" ]]; then
+            ARGS="$ARGS --tenant ${{ inputs.tenant }}"
+          fi
+          if [[ -n "${{ inputs.org }}" ]]; then
+            ARGS="$ARGS --org ${{ inputs.org }}"
+          fi
           if [[ "${{ inputs.failed_only }}" == "true" ]]; then
             ARGS="$ARGS --failed-only"
           fi
