@@ -1,0 +1,92 @@
+name: Match Action IOCs in Workflow Runs
+
+on:
+  workflow_dispatch:
+    inputs:
+      tenant:
+        description: 'StepSecurity tenant name (used when org is empty to scan all orgs in the tenant)'
+        required: false
+        type: string
+      org:
+        description: 'GitHub organization name (leave empty to scan all orgs in the tenant)'
+        required: false
+        type: string
+      ioc_csv_path:
+        description: 'Path (relative to repo root) to the IOC CSV. Header row required: action,sha,label'
+        required: true
+        type: string
+        default: 'iocs/example.csv'
+      days:
+        description: 'Look back N days (1-90). Ignored when start_time is set.'
+        required: false
+        type: number
+        default: 7
+      start_time:
+        description: 'Lower bound (Unix epoch seconds). Optional override for --days.'
+        required: false
+        type: string
+      end_time:
+        description: 'Upper bound (Unix epoch seconds). Defaults to now when --start-time is set.'
+        required: false
+        type: string
+      parallel:
+        description: 'Concurrent run-detail fetches'
+        required: false
+        type: number
+        default: 20
+
+permissions: {}
+
+jobs:
+  scan:
+    permissions:
+      contents: read  # for actions/checkout to fetch code
+    runs-on: ubuntu-latest
+    steps:
+      - name: Harden the runner (Audit all outbound calls)
+        uses: step-security/harden-runner@e3f713f2d8f53843e71c69a996d56f51aa9adfb9 # v2.14.1
+        with:
+          egress-policy: audit
+
+      - name: Checkout repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - name: Make script executable
+        run: chmod +x scripts/match_action_iocs.sh
+
+      - name: Validate inputs
+        run: |
+          if [[ -z "${{ inputs.tenant }}" && -z "${{ inputs.org }}" ]]; then
+            echo "Error: at least one of 'tenant' or 'org' must be provided." >&2
+            exit 1
+          fi
+          if [[ ! -f "${{ inputs.ioc_csv_path }}" ]]; then
+            echo "Error: IOC CSV not found at '${{ inputs.ioc_csv_path }}'." >&2
+            exit 1
+          fi
+
+      - name: Scan workflow runs against IOCs
+        run: |
+          ARGS="--token ${{ secrets.API_KEY }} --ioc-csv ${{ inputs.ioc_csv_path }} --output workflow_run_ioc_matches.csv --parallel ${{ inputs.parallel }}"
+          if [[ -n "${{ inputs.tenant }}" ]]; then
+            ARGS="$ARGS --tenant ${{ inputs.tenant }}"
+          fi
+          if [[ -n "${{ inputs.org }}" ]]; then
+            ARGS="$ARGS --org ${{ inputs.org }}"
+          fi
+          if [[ -n "${{ inputs.start_time }}" ]]; then
+            ARGS="$ARGS --start-time ${{ inputs.start_time }}"
+            if [[ -n "${{ inputs.end_time }}" ]]; then
+              ARGS="$ARGS --end-time ${{ inputs.end_time }}"
+            fi
+          else
+            ARGS="$ARGS --days ${{ inputs.days }}"
+          fi
+          ./scripts/match_action_iocs.sh $ARGS
+
+      - name: Upload results as artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: workflow-run-ioc-matches
+          path: workflow_run_ioc_matches.csv
+          retention-days: 90
