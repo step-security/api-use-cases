@@ -166,14 +166,13 @@ This helps answer:
 
 #### Example IOC CSV
 
-```csv
-action,sha,label
-tj-actions/changed-files,0e58ed867288ce82bdcabd8c25aaaa0c4ee1c8b4,CVE-2025-30066
-,abcdef0123456789abcdef0123456789abcdef01,Shai-Hulud-Wave1
-some-vendor/legacy-deploy,deadbeefdeadbeefdeadbeefdeadbeefdeadbeef,Internal-Bulletin-2026-04-12
-```
+| action                       | sha                                            | label                          |
+|------------------------------|------------------------------------------------|--------------------------------|
+| `tj-actions/changed-files`   | `0e58ed867288ce82bdcabd8c25aaaa0c4ee1c8b4`     | `CVE-2025-30066`               |
+|                              | `abcdef0123456789abcdef0123456789abcdef01`     | `Shai-Hulud-Wave1`             |
+| `some-vendor/legacy-deploy`  | `deadbeefdeadbeefdeadbeefdeadbeefdeadbeef`     | `Internal-Bulletin-2026-04-12` |
 
-(The middle row leaves `action` blank — any usage of that SHA matches, regardless of which action name was specified in the workflow.)
+The middle row leaves `action` blank — any usage of that SHA matches, regardless of which action name was specified in the workflow.
 
 #### Example output (`workflow_run_ioc_matches.csv`)
 
@@ -200,7 +199,3 @@ Per-IOC breakdown:
   CVE-2025-30066: 360 match(es) across 197 repo(s)
   Shai-Hulud-Wave1: 257 match(es) across 189 repo(s)
 ```
-
-> 💡 **Cost note:** the per-run insights endpoint is the dominant call. The script paginates the run listing, then calls insights for every run in the window that has `action_count > 0`. For a 7-day window in a busy tenant this can be tens of thousands of calls; tune `--parallel` accordingly.
-
-All workflows output structured data that can be used for reporting, compliance tracking, and making informed security decisions.
