@@ -145,4 +145,62 @@ This CSV is what you sort and filter to drive cleanup. It exposes pin type, vers
 - **Reusable-workflow blast radius:** filter `reusable_workflow != ""` and group by it → single fixes that unblock many callers.
 - **Cross-reference with maintained alternatives:** join on `action_name` against `workflow_actions_detailed.csv` rows where `maintained_action_name` is non-empty → a concrete usage list to migrate to StepSecurity-maintained replacements.
 
+### 6. Match Action IOCs in Workflow Runs
+**Workflow:** `.github/workflows/match-action-iocs.yml`
+
+When a supply chain incident publishes a list of compromised `<action, commit-SHA>` pairs, you need to know **which workflow runs in your tenant actually executed those compromised commits** — not just which repos *list* the action in YAML, but which runs actually pulled and ran that exact SHA. This scenario answers that.
+
+It scans every workflow run in a configurable time window (max 90 days, the StepSecurity API limit), pulls the runtime `actions_info` for each run, and matches the executed commit SHAs against your IOC list.
+
+This helps answer:
+- **Did any run in the last N days actually execute a compromised commit SHA?**
+- **Which repos, workflows, runs, and jobs are affected?**
+- **Was the run on the default branch, and did it conclude successfully?** (so you know what credentials/artifacts may have been exposed)
+- **Has StepSecurity already independently flagged it as an imposter commit?** (`is_imposter_commit` column — orthogonal signal you get for free)
+- **Which IOC entry caused each match?** (the `label` from your IOC CSV is carried through — useful when you're scanning multiple incidents at once)
+
+**Inputs:**
+- `--tenant` (scan all orgs in the tenant) or `--org` (scope to one org)
+- `--ioc-csv <path>` — CSV with header row `action,sha,label`. `sha` is required. `action` is optional (when present, both action AND sha must match; when blank, any usage of that SHA matches). `label` is free-form and is carried into the output.
+- Time window: `--days N` shortcut, or explicit `--start-time <epoch>` / `--end-time <epoch>` (epoch seconds).
+
+#### Example IOC CSV
+
+```csv
+action,sha,label
+tj-actions/changed-files,0e58ed867288ce82bdcabd8c25aaaa0c4ee1c8b4,CVE-2025-30066
+,abcdef0123456789abcdef0123456789abcdef01,Shai-Hulud-Wave1
+some-vendor/legacy-deploy,deadbeefdeadbeefdeadbeefdeadbeefdeadbeef,Internal-Bulletin-2026-04-12
+```
+
+(The middle row leaves `action` blank — any usage of that SHA matches, regardless of which action name was specified in the workflow.)
+
+#### Example output (`workflow_run_ioc_matches.csv`)
+
+(Selected columns; the full CSV also includes `run_url`, `event`, `head_branch`, `committer`, `run_started_at`, `run_conclusion`, `job_url`, `matched_tag`, `action_executed_at`, `is_commit_on_default_branch`.)
+
+| owner       | repo              | run_id      | run_attempt | workflow_path                       | job_name              | matched_action               | matched_sha                                | is_imposter_commit | ioc_label                |
+|-------------|-------------------|-------------|-------------|--------------------------------------|-----------------------|-------------------------------|---------------------------------------------|---------------------|---------------------------|
+| example-org | api-gateway       | 24971513660 | 1           | .github/workflows/release.yml       | publish               | tj-actions/changed-files      | 0e58ed867288ce82bdcabd8c25aaaa0c4ee1c8b4    | true                | CVE-2025-30066            |
+| example-org | frontend-web-app  | 24970815039 | 2           | .github/workflows/ci.yml            | build                 | tj-actions/changed-files      | 0e58ed867288ce82bdcabd8c25aaaa0c4ee1c8b4    | true                | CVE-2025-30066            |
+| example-org | infra-tests       | 24970721690 | 1           | .github/workflows/nightly.yml       | integration-tests     | some-vendor/legacy-deploy     | deadbeefdeadbeefdeadbeefdeadbeefdeadbeef    | false               | Internal-Bulletin-2026-04-12 |
+| example-org | ml-training       | 24948693592 | 1           | .github/workflows/train.yml         | preprocess            | (any)                         | abcdef0123456789abcdef0123456789abcdef01    | false               | Shai-Hulud-Wave1          |
+
+The run summary at the bottom of the workflow log gives a per-IOC breakdown so you can prioritize:
+
+```
+=== IOC MATCH SUMMARY for tenant 'example-tenant' (3 orgs) ===
+Window:           2026-04-20T00:00:00Z → 2026-04-27T00:00:00Z
+IOCs loaded:      3 (3 unique SHAs)
+Total matches:    617
+Unique runs:      316
+Unique repos:     200
+
+Per-IOC breakdown:
+  CVE-2025-30066: 360 match(es) across 197 repo(s)
+  Shai-Hulud-Wave1: 257 match(es) across 189 repo(s)
+```
+
+> 💡 **Cost note:** the per-run insights endpoint is the dominant call. The script paginates the run listing, then calls insights for every run in the window that has `action_count > 0`. For a 7-day window in a busy tenant this can be tens of thousands of calls; tune `--parallel` accordingly.
+
 All workflows output structured data that can be used for reporting, compliance tracking, and making informed security decisions.
