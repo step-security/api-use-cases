@@ -159,9 +159,13 @@ for CURRENT_ORG in "${ORGS[@]}"; do
   # Fetch repository list for this org
   echo "Fetching repository list for '${CURRENT_ORG}'..."
 
+  # Pass ?fields=repo so the response only carries Repo names (the only
+  # field this script reads). Avoids loading workflows/topics/etc. for
+  # every row, which keeps large orgs well under the API gateway
+  # response limit.
   REPOS_RESPONSE=$(curl -s -w "\n%{http_code}" \
     -H "Authorization: $TOKEN" \
-    "${BASE_URL}/github/${CURRENT_ORG}/actions/security-summary")
+    "${BASE_URL}/github/${CURRENT_ORG}/actions/security-summary?fields=repo")
 
   HTTP_CODE=$(echo "$REPOS_RESPONSE" | tail -1)
   REPOS_BODY=$(echo "$REPOS_RESPONSE" | sed '$d')

@@ -26,9 +26,11 @@ echo "Looking for endpoint: $DESTINATION_ENDPOINT"
 echo "Output will be saved to: $OUTPUT_FILE"
 echo "----------------------------------------"
 
-# Fetch the list of repositories
+# Fetch the list of repositories. Pass ?fields=repo so the response only
+# carries Repo names (avoids loading workflows/topics/etc. for every row;
+# also keeps large orgs well under the API gateway response limit).
 REPOS_RESPONSE=$(curl -s -X 'GET' \
-  "$BASE_URL/$OWNER/actions/security-summary" \
+  "$BASE_URL/$OWNER/actions/security-summary?fields=repo" \
   -H 'accept: application/json' \
   -H "Authorization: $API_KEY")
 
