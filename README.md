@@ -87,7 +87,47 @@ The report covers both GitHub-hosted and self-hosted runner controls and provide
 | example-org  | infra-tests      | container-scenario.yml | test-docker   | SelfHostedRunnerShouldBeHardened       | Self-Hosted   | Failed | dind-sidecar-eks-scaleset-arm    | https://github.com/example-org/infra-tests/actions/runs/103/job/203                       |
 | example-org  | docs-site        | deploy.yml          | preview          | GitHubHostedRunnerShouldBeHardened     | GitHub-Hosted | Suppressed | ubuntu-latest                | https://github.com/example-org/docs-site/actions/runs/104/job/204                         |
 
-### 5. Actions in Use Detailed CSV Report
+### 5. Harden Runner Coverage Report
+**Workflow:** `.github/workflows/harden-runner-coverage.yml`
+
+Where the compliance report (above) answers *"which jobs are configured with Harden Runner today?"*, the coverage report answers *"of all the workflow runs that actually executed in a given window, how many were monitored by Harden Runner?"* This is the metric you watch over time to track adoption — and the per-workflow breakdown tells you exactly where the unmonitored runs are coming from.
+
+Provide a `tenant` to report across every org in the tenant, or an `org` to scope the report to a single organization. The date range defaults to the last 7 days (UTC) and can be overridden with `start_date` / `end_date`. This helps answer:
+- What percentage of workflow runs in the last *N* days were monitored by Harden Runner?
+- Is coverage trending up or down day over day? (the `trend` column is the day-over-day delta in coverage %)
+- On the most recent day, which repos and workflows are driving the bulk of the unmonitored runs?
+- Across a tenant, which orgs are lagging on adoption?
+
+Two CSVs are produced in a single run:
+
+1. **`harden_runner_coverage_daily.csv`** — one row per `<owner × date>`. The time-series view for dashboards and trend charts.
+2. **`harden_runner_coverage_workflows.csv`** — one row per `<owner × repo × workflow>` for the day(s) that include a per-repo breakdown (typically the end date). The drill-down for "where are the unmonitored runs coming from?"
+
+#### `harden_runner_coverage_daily.csv` — one row per `<owner × date>`
+
+| owner        | date       | monitored_runs | unmonitored_runs | total_runs | coverage_percentage | trend  |
+|--------------|------------|----------------|------------------|------------|---------------------|--------|
+| example-org  | 2026-05-22 | 62             | 79               | 141        | 43.97               | 0      |
+| example-org  | 2026-05-23 | 1290           | 739              | 2029       | 63.58               | 19.61  |
+| example-org  | 2026-05-24 | 606            | 393              | 999        | 60.66               | -1.64  |
+| example-org  | 2026-05-25 | 1429           | 491              | 1920       | 74.43               | 12.64  |
+
+#### `harden_runner_coverage_workflows.csv` — one row per `<owner × repo × workflow>` on the breakdown day(s)
+
+| owner        | date       | repo                  | workflow_path                              | workflow_name                  | monitored_runs | unmonitored_runs | total_runs | coverage_percentage |
+|--------------|------------|-----------------------|--------------------------------------------|--------------------------------|----------------|------------------|------------|---------------------|
+| example-org  | 2026-05-25 | frontend-web-app      | .github/workflows/ci.yml                   | CI                             | 12             | 0                | 12         | 100                 |
+| example-org  | 2026-05-25 | api-gateway           | .github/workflows/release.yml              | Release                        | 0              | 4                | 4          |                     |
+| example-org  | 2026-05-25 | ml-training           | .github/workflows/train.yml                | Train model                    | 3              | 2                | 5          | 60                  |
+| example-org  | 2026-05-25 | docs-site             | .github/workflows/scorecards.yml           | Scorecard supply-chain security| 0              | 1                | 1          |                     |
+
+**Filter idioms this unlocks:**
+- **Biggest offenders right now:** sort `harden_runner_coverage_workflows.csv` by `unmonitored_runs` desc → the workflows producing the most unmonitored runs today.
+- **Zero-coverage workflows:** `monitored_runs = 0 AND total_runs > 0` → workflows that have *never* been monitored in the window, ranked by run volume.
+- **Trend reversal:** sort `harden_runner_coverage_daily.csv` by `trend` ascending → days where adoption slipped (useful for catching regressions after a rollout).
+- **Tenant-wide laggards:** group `harden_runner_coverage_daily.csv` by `owner` on the end date → which org has the lowest coverage %.
+
+### 6. Actions in Use Detailed CSV Report
 **Workflow:** `.github/workflows/actions-list-csv-basic.yml`
 
 Produces **two complementary CSVs** in a single run:
@@ -145,7 +185,7 @@ This CSV is what you sort and filter to drive cleanup. It exposes pin type, vers
 - **Reusable-workflow blast radius:** filter `reusable_workflow != ""` and group by it → single fixes that unblock many callers.
 - **Cross-reference with maintained alternatives:** join on `action_name` against `workflow_actions_detailed.csv` rows where `maintained_action_name` is non-empty → a concrete usage list to migrate to StepSecurity-maintained replacements.
 
-### 6. Match Action IOCs in Workflow Runs
+### 7. Match Action IOCs in Workflow Runs
 **Workflow:** `.github/workflows/match-action-iocs.yml`
 
 When a supply chain incident publishes a list of compromised `<action, commit-SHA>` pairs, you need to know **which workflow runs in your tenant actually executed those compromised commits** — not just which repos *list* the action in YAML, but which runs actually pulled and ran that exact SHA. This scenario answers that.
