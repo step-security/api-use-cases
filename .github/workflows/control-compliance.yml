@@ -1,0 +1,77 @@
+name: Control Compliance Report
+
+on:
+  workflow_dispatch:
+    inputs:
+      control:
+        description: 'Control name(s), comma-separated (e.g. JobsShouldUseSecureRegistry)'
+        required: true
+        type: string
+      tenant:
+        description: 'StepSecurity tenant name (used when org is empty to report across all orgs)'
+        required: false
+        type: string
+      org:
+        description: 'GitHub organization name (leave empty to report across all orgs in the tenant)'
+        required: false
+        type: string
+      failed_only:
+        description: 'Only include non-compliant entries'
+        required: false
+        type: boolean
+        default: false
+      include_details:
+        description: 'Include the additional_info column with structured control detail as JSON'
+        required: false
+        type: boolean
+        default: false
+
+permissions: {}
+
+jobs:
+  compliance-report:
+    permissions:
+      contents: read  # for actions/checkout to fetch code
+    runs-on: ubuntu-latest
+    steps:
+      - name: Harden the runner (Audit all outbound calls)
+        uses: step-security/harden-runner@e3f713f2d8f53843e71c69a996d56f51aa9adfb9 # v2.14.1
+        with:
+          egress-policy: audit
+
+      - name: Checkout repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - name: Make script executable
+        run: chmod +x scripts/control_compliance.sh
+
+      - name: Validate inputs
+        run: |
+          if [[ -z "${{ inputs.tenant }}" && -z "${{ inputs.org }}" ]]; then
+            echo "Error: at least one of 'tenant' or 'org' must be provided." >&2
+            exit 1
+          fi
+
+      - name: Generate compliance report
+        run: |
+          ARGS="--control ${{ inputs.control }} --token ${{ secrets.API_KEY }} --output control_compliance_report.csv"
+          if [[ -n "${{ inputs.tenant }}" ]]; then
+            ARGS="$ARGS --tenant ${{ inputs.tenant }}"
+          fi
+          if [[ -n "${{ inputs.org }}" ]]; then
+            ARGS="$ARGS --org ${{ inputs.org }}"
+          fi
+          if [[ "${{ inputs.failed_only }}" == "true" ]]; then
+            ARGS="$ARGS --failed-only"
+          fi
+          if [[ "${{ inputs.include_details }}" == "true" ]]; then
+            ARGS="$ARGS --include-details"
+          fi
+          ./scripts/control_compliance.sh $ARGS
+
+      - name: Upload results as artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: control-compliance-report
+          path: control_compliance_report.csv
+          retention-days: 30
