@@ -64,7 +64,7 @@ The workflow produces one CSV per job containing the step name, tool, HTTP metho
 ### 4. Harden Runner Compliance Report
 **Workflow:** `.github/workflows/harden-runner-compliance.yml`
 
-Generates a CSV compliance report showing which workflow jobs across a tenant (or a single GitHub organization) are monitored by Harden Runner. This helps answer:
+Generates a CSV compliance report showing which workflow jobs across a tenant (or a single GitHub organization) are monitored by Harden Runner. (For a report on any other control — e.g. `JobsShouldUseSecureRegistry` — see scenario 8, the generic Control Compliance Report.) This helps answer:
 - Which jobs have Harden Runner enabled (passed) vs missing (failed)?
 - Is the job running on a GitHub-hosted or self-hosted runner, and which runner labels does it use?
 - What is the overall Harden Runner adoption rate across the tenant or org?
@@ -238,4 +238,61 @@ Unique repos:     200
 Per-IOC breakdown:
   CVE-2025-30066: 360 match(es) across 197 repo(s)
   Shai-Hulud-Wave1: 257 match(es) across 189 repo(s)
+```
+
+### 8. Control Compliance Report (Any Control)
+**Workflow:** `.github/workflows/control-compliance.yml`
+
+Generates a CSV compliance report for **any StepSecurity GitHub Actions control** across a tenant (or a single GitHub organization). Where the Harden Runner Compliance Report (scenario 4) is a specialized report for the two Harden Runner controls (with runner-type classification), this scenario works for every control — pass the control name(s) as an input and get a uniform report back.
+
+Control names you can pass (comma-separated for multiple):
+
+- `JobsShouldUseSecureRegistry` — jobs that pull packages directly from public registries instead of a secure registry
+- `GithubTokenShouldHaveMinPermission` — workflows missing minimal token permissions
+- `OIDCShouldBeUsed` — jobs using long-lived cloud credentials instead of OIDC
+- `ActionsShouldBePinned` — actions not pinned to a full commit SHA
+- `MaintainedGitHubActionsShouldBeUsed` — third-party actions with a StepSecurity-maintained alternative
+- `DefaultBranchShouldBeProtected` — repos without default-branch protection
+- `GitHubHostedRunnerShouldBeHardened` / `SelfHostedRunnerShouldBeHardened` — jobs not monitored by Harden Runner
+
+This helps answer:
+- Which jobs are still pulling dependencies directly from public registries (npm, PyPI, etc.) instead of the Secure Registry?
+- What is the pass/fail/suppressed breakdown for any control, per org and per repo?
+- Which repos need attention first? (per-repo failure summary in the run logs)
+- How is compliance for a control trending — run it on a schedule and diff the CSVs.
+
+**Inputs:**
+- `control` — one or more control names, comma-separated (required)
+- `tenant` (report across all orgs in the tenant) or `org` (scope to one org)
+- `failed_only` — only include non-compliant entries (applied server-side, keeps large-org runs fast)
+- `include_details` — adds an `additional_info` column carrying the control's structured detail as JSON (e.g. for `JobsShouldUseSecureRegistry`, the matched registry endpoints with the most recent runs that called each one)
+
+The report is fetched **per repository**, so results are complete regardless of how many checks the org has in total. Row granularity depends on the control: most controls emit one row per `<repo × workflow × job>`, some are per-action or per-repo — the `workflow`/`job` columns are simply empty where they don't apply. The `reason` column always carries the human-readable finding.
+
+**Example output** (`JobsShouldUseSecureRegistry` across an org; the full CSV also includes `job_labels`, `workflow_url`, `first_failed`, `last_failed`, `last_checked`):
+
+| owner       | repo             | workflow      | job     | control                     | status | reason                                                          | job_url                                                                   |
+|-------------|------------------|---------------|---------|-----------------------------|--------|------------------------------------------------------------------|----------------------------------------------------------------------------|
+| example-org | frontend-web-app | ci.yml        | build   | JobsShouldUseSecureRegistry | Failed | Job calls public registries directly: registry.npmjs.org         | https://github.com/example-org/frontend-web-app/actions/runs/100/job/200  |
+| example-org | ml-training      | train.yml     | train   | JobsShouldUseSecureRegistry | Failed | Job calls public registries directly: pypi.org, files.pythonhosted.org | https://github.com/example-org/ml-training/actions/runs/101/job/201  |
+| example-org | api-gateway      | release.yml   | publish | JobsShouldUseSecureRegistry | Passed | No public registry calls found in the job's network baseline     | https://github.com/example-org/api-gateway/actions/runs/102/job/202       |
+
+The run summary at the bottom of the workflow log gives per-control and per-org breakdowns:
+
+```
+=== COMPLIANCE SUMMARY for organization 'example-org' ===
+Controls:          JobsShouldUseSecureRegistry
+Total orgs:        1
+Total repos:       42
+Total checks:      118
+  Passed:          97
+  Failed:          19
+  Suppressed:      2
+
+Per-control breakdown:
+  JobsShouldUseSecureRegistry: total=118, passed=97, failed=19, suppressed=2
+
+Repos with non-compliant checks (7):
+  example-org/frontend-web-app: 6 failing check(s)
+  example-org/ml-training: 4 failing check(s)
 ```
