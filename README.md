@@ -296,3 +296,51 @@ Repos with non-compliant checks (7):
   example-org/frontend-web-app: 6 failing check(s)
   example-org/ml-training: 4 failing check(s)
 ```
+
+### 9. Export Access Control (Roles, Permissions & Entitlements)
+**Workflow:** `.github/workflows/export-access-control.yml`
+
+Exports your tenant's complete access-control model as **two CSVs** in a single run, so you can review it in a spreadsheet, hand it to an auditor, or feed it into another system. It covers the two built-in roles (`admin`, `auditor`) plus every custom role your tenant has defined, and maps every user to the roles they hold. This helps answer:
+
+- What can each role do? (the exact permission list behind `admin`, `auditor`, and each custom role)
+- Who has access, and at what role? (every user and the role(s) granted to them)
+- At what scope is each grant applied — the whole tenant, a single organization, or specific repositories/projects?
+- Which users hold the most privileged (`admin`) access?
+- Which custom roles exist, who created them, and what do they grant?
+
+This script requires your tenant name. You can find it under the Admin Console URL: `app.stepsecurity.io/<TENANT_NAME>/admin-console`
+
+Two CSVs are produced:
+
+1. **`roles_permissions.csv`** — one row per `<role × permission>`. The "what can each role do?" view.
+2. **`role_entitlements.csv`** — one row per `<user × role grant>`. The "who has access to what?" view.
+
+#### `roles_permissions.csv` — one row per role × permission
+
+`role_type` is `built-in` for the two system roles and `custom` for tenant-defined roles. `role_id` and `description` are populated only for custom roles.
+
+| role      | role_type | role_id                              | description               | permission             |
+|-----------|-----------|--------------------------------------|---------------------------|------------------------|
+| admin     | built-in  |                                      |                           | baseline-write         |
+| admin     | built-in  |                                      |                           | detections-write       |
+| auditor   | built-in  |                                      |                           | baseline-read          |
+| auditor   | built-in  |                                      |                           | detections-read        |
+| developer | custom    | bd2f8264-dedd-4471-b59c-ff1bab4ed6e6 | Gives access to developers | workflow-runs-read     |
+| developer | custom    | bd2f8264-dedd-4471-b59c-ff1bab4ed6e6 | Gives access to developers | baseline-read          |
+
+#### `role_entitlements.csv` — one row per user × role grant
+
+`scope` is the breadth of the grant (`customer` = whole tenant, `organization`, or `repository`). `organization` and `scope_targets` are normalized across GitHub, GitLab, and Azure DevOps; `*` means "all". A user with no grants is still listed once with empty role columns so nobody is silently dropped.
+
+| user             | auth_type | role    | scope        | platform | organization    | scope_targets |
+|------------------|-----------|---------|--------------|----------|-----------------|---------------|
+| alice-example    | Github    | admin   | customer     | github   | *               | *             |
+| bob-example      | Github    | auditor | organization | github   | example-org     | *             |
+| carol@example.io | Local     | admin   | customer     | *        | *               | *             |
+| dave-example     | Github    | developer | repository | github   | example-org     | frontend-web-app\|api-gateway |
+
+**Filter idioms this unlocks:**
+- **Privileged-access review:** filter `role_entitlements.csv` on `role = "admin"` → everyone with full access, the first list any auditor asks for.
+- **Least-privilege check on a role:** filter `roles_permissions.csv` on a `role` and look for `-write` permissions → does this role grant more than it should?
+- **Custom-role inventory:** filter `roles_permissions.csv` on `role_type = "custom"` → every tenant-defined role and exactly what it grants.
+- **Scoped vs. tenant-wide access:** filter `role_entitlements.csv` on `scope != "customer"` → grants limited to specific orgs or repos, useful for spotting where access is (or isn't) narrowed.

@@ -1,0 +1,45 @@
+name: Export Access Control
+
+on:
+  workflow_dispatch:
+    inputs:
+      tenant:
+        description: 'StepSecurity tenant name (find it under app.stepsecurity.io/<TENANT_NAME>/admin-console)'
+        required: true
+        type: string
+
+permissions: {}
+
+jobs:
+  export-access-control:
+    permissions:
+      contents: read  # for actions/checkout to fetch code
+    runs-on: ubuntu-latest
+    steps:
+      - name: Harden the runner (Audit all outbound calls)
+        uses: step-security/harden-runner@e3f713f2d8f53843e71c69a996d56f51aa9adfb9 # v2.14.1
+        with:
+          egress-policy: audit
+
+      - name: Checkout repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - name: Make script executable
+        run: chmod +x scripts/export_access_control.sh
+
+      - name: Export access control model
+        run: |
+          ./scripts/export_access_control.sh \
+            "${{ inputs.tenant }}" \
+            "${{ secrets.API_KEY }}" \
+            "roles_permissions.csv" \
+            "role_entitlements.csv"
+
+      - name: Upload results as artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: access-control-export
+          path: |
+            roles_permissions.csv
+            role_entitlements.csv
+          retention-days: 30
