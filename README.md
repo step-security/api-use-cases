@@ -64,7 +64,7 @@ The workflow produces one CSV per job containing the step name, tool, HTTP metho
 ### 4. Harden Runner Compliance Report
 **Workflow:** `.github/workflows/harden-runner-compliance.yml`
 
-Generates a CSV compliance report showing which workflow jobs across a tenant (or a single GitHub organization) are monitored by Harden Runner. (For a report on any other control — e.g. `JobsShouldUseSecureRegistry` — see scenario 8, the generic Control Compliance Report.) This helps answer:
+Generates a CSV compliance report showing which workflow jobs across a tenant (or a single GitHub organization) are monitored by Harden Runner. (For a report on any other control — e.g. `JobsShouldUseSecureRegistry` — see scenario 8, the generic Control Compliance Report. For *how compliance changed over time*, see scenario 10, the Compliance Trend report — the report below is always a point-in-time snapshot of the current state.) This helps answer:
 - Which jobs have Harden Runner enabled (passed) vs missing (failed)?
 - Is the job running on a GitHub-hosted or self-hosted runner, and which runner labels does it use?
 - What is the overall Harden Runner adoption rate across the tenant or org?
@@ -344,3 +344,32 @@ Two CSVs are produced:
 - **Least-privilege check on a role:** filter `roles_permissions.csv` on a `role` and look for `-write` permissions → does this role grant more than it should?
 - **Custom-role inventory:** filter `roles_permissions.csv` on `role_type = "custom"` → every tenant-defined role and exactly what it grants.
 - **Scoped vs. tenant-wide access:** filter `role_entitlements.csv` on `scope != "customer"` → grants limited to specific orgs or repos, useful for spotting where access is (or isn't) narrowed.
+
+### 10. Harden Runner Compliance Trend
+**Workflow:** `.github/workflows/harden-runner-compliance-trend.yml`
+
+Answers *"how many more repos became compliant with Harden Runner over the last N days?"* The compliance report (scenario 4) is point-in-time: the controls API always returns the current state and does not accept date filters, so it cannot answer trend questions on its own. This report instead uses the Harden Runner coverage API, which stores roughly one year of daily history of monitored vs unmonitored runs per repository, and compares two windows: a baseline window ending `days_ago` days ago (default 30) and a current window ending yesterday (both `window` days wide, default 7). This helps answer:
+- How many repos became fully monitored (compliant) since the baseline?
+- Did any repos regress from fully monitored to partially or unmonitored?
+- Which repos are new since the baseline, and did they start out compliant?
+- Is org-wide run coverage trending up or down between the two windows?
+
+A repo only appears in a day's coverage data if it ran workflows that day, which is why each side aggregates a multi-day window instead of comparing two single days. Repos with no runs in a window are classified `no_runs` / `no_recent_runs` rather than guessed at.
+
+**Example output** (`harden_runner_trend.csv` — one row per repo):
+
+| repo             | transition          | baseline_status     | baseline_monitored_runs | baseline_total_runs | current_status      | current_monitored_runs | current_total_runs |
+|------------------|---------------------|---------------------|-------------------------|---------------------|---------------------|------------------------|--------------------|
+| frontend-web-app | became_compliant    | unmonitored         | 0                       | 14                  | fully_monitored     | 22                     | 22                 |
+| api-gateway      | regressed           | fully_monitored     | 31                      | 31                  | partially_monitored | 12                     | 19                 |
+| ml-training      | stayed_compliant    | fully_monitored     | 8                       | 8                   | fully_monitored     | 11                     | 11                 |
+| docs-site        | still_noncompliant  | partially_monitored | 3                       | 9                   | unmonitored         | 0                      | 6                  |
+| new-service      | new_repo_compliant  | no_runs             | 0                       | 0                   | fully_monitored     | 4                      | 4                  |
+
+The run log also prints a summary: run coverage % for both windows, a count per transition type, and the lists of repos that became compliant or regressed.
+
+**Filter idioms this unlocks:**
+- **The headline number:** count rows with `transition = "became_compliant"` → "N more repos became compliant in the last 30 days."
+- **Regression watchlist:** `transition = "regressed"` → repos that lost coverage since the baseline; investigate before the number grows.
+- **Onboarding quality:** `transition = "new_repo_noncompliant"` → new repos that started life without Harden Runner, a signal to fix repo templates.
+- **True time series:** for longer-term charts, run scenario 4 (or this report) on a schedule and archive the CSVs; each run is a durable snapshot.

@@ -1,0 +1,54 @@
+name: Harden Runner Compliance Trend
+
+on:
+  workflow_dispatch:
+    inputs:
+      org:
+        description: 'GitHub organization name'
+        required: true
+        type: string
+      days_ago:
+        description: 'How far back the baseline window ends (default: 30)'
+        required: false
+        type: string
+      window:
+        description: 'Days aggregated per window (default: 7)'
+        required: false
+        type: string
+
+permissions: {}
+
+jobs:
+  compliance-trend:
+    permissions:
+      contents: read  # for actions/checkout to fetch code
+    runs-on: ubuntu-latest
+    steps:
+      - name: Harden the runner (Audit all outbound calls)
+        uses: step-security/harden-runner@e3f713f2d8f53843e71c69a996d56f51aa9adfb9 # v2.14.1
+        with:
+          egress-policy: audit
+
+      - name: Checkout repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - name: Make script executable
+        run: chmod +x scripts/harden_runner_compliance_trend.sh
+
+      - name: Generate compliance trend report
+        run: |
+          ARGS="--org ${{ inputs.org }} --token ${{ secrets.API_KEY }} --output harden_runner_trend.csv"
+          if [[ -n "${{ inputs.days_ago }}" ]]; then
+            ARGS="$ARGS --days-ago ${{ inputs.days_ago }}"
+          fi
+          if [[ -n "${{ inputs.window }}" ]]; then
+            ARGS="$ARGS --window ${{ inputs.window }}"
+          fi
+          ./scripts/harden_runner_compliance_trend.sh $ARGS
+
+      - name: Upload results as artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: harden-runner-compliance-trend-report
+          path: harden_runner_trend.csv
+          retention-days: 30
