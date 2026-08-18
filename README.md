@@ -373,3 +373,47 @@ The run log also prints a summary: run coverage % for both windows, a count per 
 - **Regression watchlist:** `transition = "regressed"` → repos that lost coverage since the baseline; investigate before the number grows.
 - **Onboarding quality:** `transition = "new_repo_noncompliant"` → new repos that started life without Harden Runner, a signal to fix repo templates.
 - **True time series:** for longer-term charts, run scenario 4 (or this report) on a schedule and archive the CSVs; each run is a durable snapshot.
+
+### 11. Composite Actions Expansion
+**Workflow:** `.github/workflows/list-composite-actions.yml`
+
+Identifies which of the actions in use across an org are **composite actions**, and recursively expands the actions nested inside each one (the `uses:` steps in the composite's `action.yml`) until only leaf node/docker actions remain. A composite action can quietly pull in a whole tree of other actions, so the action you approved is rarely the only code that runs. This report makes that hidden dependency tree explicit. It helps answer:
+- Which of the actions we depend on are composite actions rather than plain node/docker actions?
+- What actions does each composite pull in, directly and transitively?
+- How deep does a given composite's dependency tree go, and does a nested action reintroduce something we thought we had removed?
+- After a compromised-action advisory, is the affected action reachable *inside* a composite we use, not just referenced directly?
+
+It uses two public StepSecurity API endpoints: `GET /v1/github/<org>/actions/workflow-actions` for the inventory, then `POST /v1/github/actions/action-details` per action, which returns `actionType` (composite, node24, docker, and so on) and, for composites, the nested `composite_actions.actions` list. The script re-runs the details call on each nested action, memoizes results, and stops on cycles. Pass `--no-recurse` (or set the `no_recurse` input) to list only the direct children.
+
+**Example output** (`composite_actions_tree.txt`, indented tree, one root per composite that calls other actions):
+
+```
+- aquasecurity/trivy-action [composite]
+  - aquasecurity/setup-trivy@81e5143... [composite]
+    - actions/cache/restore@9255dc7... [node24]
+    - actions/checkout@8e8c483... [node24]
+    - actions/cache/save@9255dc7... [node24]
+  - actions/cache@55cc834... [node24]
+
+- example-org/build-and-sign [composite]
+  - actions/setup-go@b7ad1da... [node24]
+  - example-org/internal-signer@a8f4274... [composite]
+    - actions/upload-artifact@ea165f8... [node24]
+```
+
+The companion `composite_actions.csv` is the same data flattened for sorting and filtering:
+
+| root_composite            | depth | action                                   | action_type | parent                     |
+|---------------------------|-------|------------------------------------------|-------------|----------------------------|
+| aquasecurity/trivy-action | 0     | aquasecurity/trivy-action                | composite   |                            |
+| aquasecurity/trivy-action | 1     | aquasecurity/setup-trivy@81e5143...      | composite   | aquasecurity/trivy-action  |
+| aquasecurity/trivy-action | 2     | actions/checkout@8e8c483...              | node24      | aquasecurity/setup-trivy   |
+| aquasecurity/trivy-action | 1     | actions/cache@55cc834...                 | node24      | aquasecurity/trivy-action  |
+| example-org/build-and-sign| 0     | example-org/build-and-sign               | composite   |                            |
+| example-org/build-and-sign| 1     | example-org/internal-signer@a8f4274...   | composite   | example-org/build-and-sign |
+
+**Filter idioms this unlocks:**
+- **Composite inventory:** rows where `depth = 0` list every composite action in use.
+- **Hidden dependencies:** rows where `depth >= 1` are actions that run only because a composite pulls them in, not because a workflow references them directly.
+- **Deep trees:** sort by `depth` desc to find the composites with the longest transitive chains, the ones hardest to fully SHA-pin and audit.
+- **Blast radius after an advisory:** filter `action` on the affected action name to see every composite whose tree includes it, then cross-reference with scenario 7 (Match Action IOCs) for runtime evidence.
