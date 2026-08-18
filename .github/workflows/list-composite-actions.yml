@@ -1,0 +1,50 @@
+name: List Composite Actions
+
+on:
+  workflow_dispatch:
+    inputs:
+      org:
+        description: 'GitHub organization name'
+        required: true
+        type: string
+      no_recurse:
+        description: 'Only list direct nested actions (one level), do not expand transitively'
+        required: false
+        default: false
+        type: boolean
+
+permissions: {}
+
+jobs:
+  list-composite-actions:
+    permissions:
+      contents: read
+    runs-on: ubuntu-latest
+    steps:
+      - name: Harden the runner (Audit all outbound calls)
+        uses: step-security/harden-runner@e3f713f2d8f53843e71c69a996d56f51aa9adfb9 # v2.14.1
+        with:
+          egress-policy: audit
+
+      - name: Checkout repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - name: Make script executable
+        run: chmod +x scripts/list_composite_actions.sh
+
+      - name: List composite actions
+        run: |
+          ARGS="--org ${{ inputs.org }} --token ${{ secrets.API_KEY }} --tree-output composite_actions_tree.txt --csv-output composite_actions.csv"
+          if [[ "${{ inputs.no_recurse }}" == "true" ]]; then
+            ARGS="$ARGS --no-recurse"
+          fi
+          ./scripts/list_composite_actions.sh $ARGS
+
+      - name: Upload results as artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: composite-actions-${{ inputs.org }}
+          path: |
+            composite_actions_tree.txt
+            composite_actions.csv
+          retention-days: 30
