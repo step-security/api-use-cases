@@ -417,3 +417,75 @@ The companion `composite_actions.csv` is the same data flattened for sorting and
 - **Hidden dependencies:** rows where `depth >= 1` are actions that run only because a composite pulls them in, not because a workflow references them directly.
 - **Deep trees:** sort by `depth` desc to find the composites with the longest transitive chains, the ones hardest to fully SHA-pin and audit.
 - **Blast radius after an advisory:** filter `action` on the affected action name to see every composite whose tree includes it, then cross-reference with scenario 7 (Match Action IOCs) for runtime evidence.
+
+### 12. Detect Deleted Workflow Runs
+**Workflow:** `.github/workflows/detect-deleted-workflow-runs.yml`
+
+Snapshots workflow-run metadata from the StepSecurity API and diffs it against the GitHub Actions API to find runs that **no longer exist on GitHub**.
+
+StepSecurity records run metadata independently of GitHub. Deleting a workflow run is a common way to remove evidence after a secret-exfiltration attempt, and GitHub keeps no tenant-visible record that a run was ever deleted. Any run StepSecurity recorded that GitHub now returns 404 for is a lead worth investigating.
+
+This helps answer:
+- Did anyone delete workflow runs in the incident window, and which ones?
+- Who triggered the deleted run, on what branch, from which workflow file?
+- If nothing was deleted, where should the investigation go next?
+
+Scope the analysis by time range, by run-id range, or both:
+
+```bash
+# Time range (dates or Unix epoch seconds)
+./scripts/detect_deleted_workflow_runs.sh \
+  --owner example-org --repo example-repo \
+  --token "$STEPSECURITY_TOKEN" --github-token "$GH_TOKEN" \
+  --start-time 2026-07-01 --end-time 2026-08-05
+
+# Run-id range
+./scripts/detect_deleted_workflow_runs.sh \
+  --owner example-org --repo example-repo \
+  --token "$STEPSECURITY_TOKEN" --github-token "$GH_TOKEN" \
+  --min-run-id 30591205847 --max-run-id 31455880847
+
+# Snapshot StepSecurity metadata only, no GitHub diff
+./scripts/detect_deleted_workflow_runs.sh \
+  --owner example-org --repo example-repo \
+  --token "$STEPSECURITY_TOKEN" --skip-github-check
+```
+
+**Output** (`deleted-run-analysis/`):
+- `workflow-runs.json`: every run in scope, with metadata plus a `github_state` field
+- `deleted-runs.json`: only the runs GitHub no longer has
+- `summary.json`: counts per state
+
+**Example** `deleted-runs.json` entry:
+
+| field | value |
+|---|---|
+| `run_id` | `31892041773` |
+| `workflow_path` | `.github/workflows/codeql-analysis.yml` |
+| `head_branch` | `fix/ci-retry` |
+| `event` | `push` |
+| `actor` | `example-user` |
+| `started_at` | `2026-08-02T03:14:52Z` |
+| `secrets_detected_count` | `1` |
+| `github_state` | `deleted` |
+| `stepsecurity_url` | `https://app.stepsecurity.io/github/example-org/example-repo/actions/runs/31892041773` |
+
+Each run is classified so an access problem can never be mistaken for an attack:
+
+| `github_state` | Meaning |
+|---|---|
+| `present` | Run still exists on GitHub (HTTP 200) |
+| `deleted` | Run is gone (HTTP 404). Investigate |
+| `inaccessible` | HTTP 401/403, a token problem. **Not** counted as deleted |
+| `rate_limited` | HTTP 429. Re-run with a lower `--parallel` |
+| `unknown` | Any other response. Not counted as deleted |
+
+**Interpreting the result:**
+- **Runs were deleted** → start with those. Cross-reference the `head_branch` and `actor`, and pull the branch's workflow file at that commit to see what the run actually did.
+- **Nothing was deleted** → no evidence was removed, so review the workflow files themselves. Search every branch (not just the default) for `toJSON(secrets)`, which serializes every secret in scope, and for dynamic indexing such as `secrets[<expression>]`, which static analysis cannot bound to a single secret.
+
+**Requirements and limits worth knowing before you run it:**
+- The StepSecurity runs listing **rejects a `start_time` more than 90 days in the past**, so this cannot look further back than 90 days. The script defaults to just inside that limit and clamps a too-old `start_time` forward rather than failing partway through pagination.
+- The API has no run-id filter, so a run-id range is applied client-side after fetching the window. A run-id range on its own uses the default 90-day window.
+- The GitHub token needs **`actions: read`** on the target repo, either a fine-grained PAT with Actions:Read or a classic PAT with `repo` for private repositories. The default `GITHUB_TOKEN` is scoped to the repo running the workflow, so analyzing any other repo requires a separate `GH_READ_TOKEN` secret.
+- For a **private** repo, GitHub returns **404 rather than 403** when a token lacks `actions: read`, which would make every run look deleted. The script therefore verifies repo and Actions-listing access up front and refuses to run on an underscoped token, and warns if literally every run comes back 404.
