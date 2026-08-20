@@ -25,7 +25,9 @@
 # Requirements: curl, jq
 #
 # The GitHub token needs `actions: read` on the target repo (a fine-grained PAT
-# with Actions:Read, or a classic PAT with `repo` for private repositories).
+# with Actions:Read, or a classic PAT with `repo` for private repositories). It
+# is optional for public repos, which can be read anonymously, but anonymous
+# access only gets 60 API requests/hour and this spends one per run.
 
 set -euo pipefail
 
@@ -61,8 +63,11 @@ Required:
   --repo                Repository name
   --token               StepSecurity API token
 
-Required unless --skip-github-check:
-  --github-token        GitHub token with `actions: read` on the target repo
+Optional (strongly recommended):
+  --github-token        GitHub token with `actions: read` on the target repo.
+                        Omit it for a public repo to check anonymously, but note
+                        anonymous access is capped at 60 API requests/hour versus
+                        5,000 authenticated, and this uses one request per run.
 
 Scope (pass a time range, a run-id range, or both):
   --start-time          Window start: Unix epoch seconds or YYYY-MM-DD (default: 90 days ago)
@@ -103,9 +108,14 @@ for tool in curl jq; do
 done
 
 [[ -z "$OWNER" || -z "$REPO" || -z "$TOKEN" ]] && usage
-if [[ "$SKIP_GITHUB_CHECK" == "false" && -z "$GITHUB_TOKEN" ]]; then
-  echo "Error: --github-token is required unless --skip-github-check is set" >&2
-  exit 1
+
+# --github-token is optional. Public repos can be checked unauthenticated, and
+# the preflight below proves whether that actually works for this repo. The only
+# real cost of going unauthenticated is a much smaller rate-limit budget, which
+# the preflight also checks against the number of runs in scope.
+GH_AUTH_ARGS=()
+if [[ -n "$GITHUB_TOKEN" ]]; then
+  GH_AUTH_ARGS=(-H "Authorization: Bearer $GITHUB_TOKEN")
 fi
 
 # Accept either a Unix timestamp or YYYY-MM-DD. GNU date and BSD (macOS) date
@@ -246,19 +256,35 @@ echo "----------------------------------------"
 echo "StepSecurity runs in scope: $TOTAL"
 echo "Metadata written to: $ALL_RUNS"
 
+# Every exit path writes the same summary keys so consumers never have to guess
+# which shape they got. github_checked distinguishes "0 deleted" from "not looked".
+write_summary() {
+  jq -n \
+    --arg owner "$OWNER" --arg repo "$REPO" \
+    --argjson start "$START_EPOCH" --argjson end "$END_EPOCH" \
+    --argjson total "${1:-0}" --argjson checked "${2:-0}" \
+    --argjson present "${3:-0}" --argjson deleted "${4:-0}" \
+    --argjson inaccessible "${5:-0}" --argjson rate_limited "${6:-0}" \
+    --argjson unknown "${7:-0}" \
+    --argjson github_checked "${8:-false}" \
+    --arg note "${9:-}" \
+    '{owner:$owner, repo:$repo,
+      window: {start_utc: ($start|todate), end_utc: ($end|todate)},
+      stepsecurity_runs:$total, github_checked:$github_checked, checked:$checked,
+      present_on_github:$present, deleted_from_github:$deleted,
+      inaccessible:$inaccessible, rate_limited:$rate_limited, unknown:$unknown}
+     + (if $note == "" then {} else {note:$note} end)' > "$SUMMARY"
+}
+
 if [[ "$TOTAL" -eq 0 ]]; then
-  jq -n --arg owner "$OWNER" --arg repo "$REPO" \
-    '{owner:$owner, repo:$repo, stepsecurity_runs:0, checked:0,
-      deleted:0, inaccessible:0,
-      note:"No runs returned for this scope. Widen the window or check the token."}' > "$SUMMARY"
+  write_summary 0 0 0 0 0 0 0 false \
+    "No runs returned for this scope. Widen the window or check the StepSecurity token."
   exit 0
 fi
 
 if [[ "$SKIP_GITHUB_CHECK" == "true" ]]; then
   echo "Skipping GitHub existence check (--skip-github-check)."
-  jq -n --arg owner "$OWNER" --arg repo "$REPO" --argjson total "$TOTAL" \
-    '{owner:$owner, repo:$repo, stepsecurity_runs:$total, checked:0,
-      deleted:null, inaccessible:null, note:"GitHub diff skipped"}' > "$SUMMARY"
+  write_summary "$TOTAL" 0 0 0 0 0 0 false "GitHub diff skipped"
   exit 0
 fi
 
@@ -271,32 +297,77 @@ fi
 # read access up front and refuse to guess.
 # ---------------------------------------------------------------------------
 echo "----------------------------------------"
-echo "Verifying GitHub token access to $OWNER/$REPO"
+if [[ -n "$GITHUB_TOKEN" ]]; then
+  echo "Verifying GitHub token access to $OWNER/$REPO"
+else
+  echo "Verifying unauthenticated GitHub access to $OWNER/$REPO (no --github-token given)"
+fi
 
 gh_status() {
   curl -sS -o /dev/null -w '%{http_code}' \
     -H 'Accept: application/vnd.github+json' \
-    -H "Authorization: Bearer $GITHUB_TOKEN" \
+    "${GH_AUTH_ARGS[@]+"${GH_AUTH_ARGS[@]}"}" \
     -H 'X-GitHub-Api-Version: 2022-11-28' \
     "$1" 2>/dev/null || echo "000"
+}
+
+access_hint() {
+  if [[ -n "$GITHUB_TOKEN" ]]; then
+    echo "       The token needs 'actions: read' on $OWNER/$REPO." >&2
+  else
+    echo "       This repo is not readable anonymously, so pass --github-token with" >&2
+    echo "       'actions: read' on $OWNER/$REPO." >&2
+  fi
 }
 
 REPO_CODE=$(gh_status "$GITHUB_API/repos/$OWNER/$REPO")
 if [[ "$REPO_CODE" != "200" ]]; then
   echo "Error: GitHub returned HTTP $REPO_CODE for repos/$OWNER/$REPO." >&2
-  echo "       The token cannot see this repository, so a 404 on an individual run" >&2
-  echo "       would be indistinguishable from a deletion. Fix the token and re-run." >&2
+  echo "       Without read access a 404 on an individual run is indistinguishable" >&2
+  echo "       from a deletion, so this would report every run as deleted." >&2
+  access_hint
   exit 1
 fi
 
 RUNS_CODE=$(gh_status "$GITHUB_API/repos/$OWNER/$REPO/actions/runs?per_page=1")
 if [[ "$RUNS_CODE" != "200" ]]; then
   echo "Error: GitHub returned HTTP $RUNS_CODE for the Actions runs listing." >&2
-  echo "       The token needs 'actions: read' on $OWNER/$REPO. Without it every run" >&2
-  echo "       lookup 404s and would be misreported as deleted." >&2
+  echo "       Without it every run lookup 404s and would be misreported as deleted." >&2
+  access_hint
   exit 1
 fi
 echo "  repo readable, Actions runs listing readable"
+
+# Rate-limit budget. This is the practical blocker for the unauthenticated path:
+# anonymous GitHub API calls get 60/hour, versus 5,000/hour authenticated, and
+# this scenario spends one request per run. Check the real remaining quota rather
+# than assuming, and stop before burning it on a partial answer.
+RATE_JSON=$(curl -sS -H 'Accept: application/vnd.github+json' \
+  "${GH_AUTH_ARGS[@]+"${GH_AUTH_ARGS[@]}"}" \
+  -H 'X-GitHub-Api-Version: 2022-11-28' \
+  "$GITHUB_API/rate_limit" 2>/dev/null || echo '{}')
+REMAINING=$(printf '%s' "$RATE_JSON" | jq -r '.resources.core.remaining // .rate.remaining // empty')
+RESET_AT=$(printf '%s' "$RATE_JSON" | jq -r '.resources.core.reset // .rate.reset // empty')
+
+if [[ -n "$REMAINING" ]]; then
+  echo "  GitHub API requests remaining: $REMAINING (need $TOTAL)"
+  if (( REMAINING < TOTAL )); then
+    echo "" >&2
+    echo "Error: not enough GitHub API quota to check every run ($REMAINING remaining, $TOTAL needed)." >&2
+    if [[ -n "$RESET_AT" ]]; then
+      echo "       Quota resets at $(date -u -r "$RESET_AT" 2>/dev/null || date -u -d "@$RESET_AT")." >&2
+    fi
+    if [[ -z "$GITHUB_TOKEN" ]]; then
+      echo "       Anonymous access is capped at 60 requests/hour. Pass --github-token" >&2
+      echo "       for a 5,000/hour budget." >&2
+    else
+      echo "       Narrow the scope with --start-time/--end-time or a run-id range," >&2
+      echo "       or wait for the reset." >&2
+    fi
+    echo "       Stopping rather than reporting a partial result as if it were complete." >&2
+    exit 1
+  fi
+fi
 
 # ---------------------------------------------------------------------------
 # Step 2: ask GitHub whether each run still exists.
@@ -311,9 +382,11 @@ STATUS_DIR=$(mktemp -d)
 check_run() {
   local run_id="$1"
   local code
+  local auth=()
+  [[ -n "${GITHUB_TOKEN:-}" ]] && auth=(-H "Authorization: Bearer $GITHUB_TOKEN")
   code=$(curl -sS -o /dev/null -w '%{http_code}' \
     -H 'Accept: application/vnd.github+json' \
-    -H "Authorization: Bearer $GITHUB_TOKEN" \
+    "${auth[@]+"${auth[@]}"}" \
     -H 'X-GitHub-Api-Version: 2022-11-28' \
     "$GITHUB_API/repos/$OWNER/$REPO/actions/runs/$run_id" 2>/dev/null || echo "000")
   echo "$code" > "$STATUS_DIR/$run_id"
@@ -362,17 +435,8 @@ INACCESSIBLE=$(jq '[.[] | select(.github_state == "inaccessible")] | length' "$A
 RATE_LIMITED=$(jq '[.[] | select(.github_state == "rate_limited")] | length' "$ALL_RUNS")
 UNKNOWN=$(jq '[.[] | select(.github_state == "unknown")] | length' "$ALL_RUNS")
 
-jq -n \
-  --arg owner "$OWNER" --arg repo "$REPO" \
-  --argjson start "$START_EPOCH" --argjson end "$END_EPOCH" \
-  --argjson total "$TOTAL" --argjson present "$PRESENT" \
-  --argjson deleted "$DELETED" --argjson inaccessible "$INACCESSIBLE" \
-  --argjson rate_limited "$RATE_LIMITED" --argjson unknown "$UNKNOWN" \
-  '{owner:$owner, repo:$repo,
-    window: {start_utc: ($start|todate), end_utc: ($end|todate)},
-    stepsecurity_runs:$total, present_on_github:$present,
-    deleted_from_github:$deleted, inaccessible:$inaccessible,
-    rate_limited:$rate_limited, unknown:$unknown}' > "$SUMMARY"
+write_summary "$TOTAL" "$TOTAL" "$PRESENT" "$DELETED" \
+  "$INACCESSIBLE" "$RATE_LIMITED" "$UNKNOWN" true ""
 
 echo "----------------------------------------"
 echo "Present on GitHub:     $PRESENT"

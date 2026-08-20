@@ -445,6 +445,12 @@ Scope the analysis by time range, by run-id range, or both:
   --token "$STEPSECURITY_TOKEN" --github-token "$GH_TOKEN" \
   --min-run-id 30591205847 --max-run-id 31455880847
 
+# Public repo: no GitHub token needed (anonymous, small scopes only)
+./scripts/detect_deleted_workflow_runs.sh \
+  --owner example-org --repo example-repo \
+  --token "$STEPSECURITY_TOKEN" \
+  --min-run-id 30591205847 --max-run-id 30591300000
+
 # Snapshot StepSecurity metadata only, no GitHub diff
 ./scripts/detect_deleted_workflow_runs.sh \
   --owner example-org --repo example-repo \
@@ -484,8 +490,18 @@ Each run is classified so an access problem can never be mistaken for an attack:
 - **Runs were deleted** → start with those. Cross-reference the `head_branch` and `actor`, and pull the branch's workflow file at that commit to see what the run actually did.
 - **Nothing was deleted** → no evidence was removed, so review the workflow files themselves. Search every branch (not just the default) for `toJSON(secrets)`, which serializes every secret in scope, and for dynamic indexing such as `secrets[<expression>]`, which static analysis cannot bound to a single secret.
 
+**GitHub credentials:** `--github-token` is optional.
+
+| Situation | What to use | Rate limit |
+|---|---|---|
+| Public target repo | Nothing, or the workflow's `GITHUB_TOKEN` | 60/hour anonymous, 5,000/hour with `GITHUB_TOKEN` |
+| Private target repo | `GH_READ_TOKEN` secret: a PAT with `actions: read` | 5,000/hour |
+
+The workflow prefers `GH_READ_TOKEN`, falls back to `GITHUB_TOKEN`, and only skips the diff if you explicitly ask it to. A public repo therefore needs no extra setup.
+
 **Requirements and limits worth knowing before you run it:**
 - The StepSecurity runs listing **rejects a `start_time` more than 90 days in the past**, so this cannot look further back than 90 days. The script defaults to just inside that limit and clamps a too-old `start_time` forward rather than failing partway through pagination.
 - The API has no run-id filter, so a run-id range is applied client-side after fetching the window. A run-id range on its own uses the default 90-day window.
-- The GitHub token needs **`actions: read`** on the target repo, either a fine-grained PAT with Actions:Read or a classic PAT with `repo` for private repositories. The default `GITHUB_TOKEN` is scoped to the repo running the workflow, so analyzing any other repo requires a separate `GH_READ_TOKEN` secret.
-- For a **private** repo, GitHub returns **404 rather than 403** when a token lacks `actions: read`, which would make every run look deleted. The script therefore verifies repo and Actions-listing access up front and refuses to run on an underscoped token, and warns if literally every run comes back 404.
+- This spends **one GitHub API request per run**, so anonymous access realistically covers fewer than 60 runs. The script reads your actual remaining quota before checking anything and stops with the reset time if it is insufficient, rather than half-completing and reporting the result as if it were whole.
+- For a **private** repo, GitHub returns **404 rather than 403** when a token lacks `actions: read`, which would make every run look deleted. The script verifies repo and Actions-listing access up front, refuses to run on an underscoped token, and warns if literally every run comes back 404.
+- `summary.json` always carries the same keys, and `github_checked` tells you whether the GitHub diff actually ran. Treat `deleted_from_github: 0` as meaningful **only** when `github_checked` is `true`, otherwise nothing was looked at.

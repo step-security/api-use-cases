@@ -39,6 +39,7 @@ jobs:
   detect-deleted-runs:
     permissions:
       contents: read  # for actions/checkout to fetch code
+      actions: read   # lets the fallback GITHUB_TOKEN read workflow runs
     runs-on: ubuntu-latest
     steps:
       - name: Harden the runner (Audit all outbound calls)
@@ -56,11 +57,14 @@ jobs:
         env:
           # StepSecurity API token.
           API_KEY: ${{ secrets.API_KEY }}
-          # GitHub token with `actions: read` on the target repo. Needed because
-          # the default GITHUB_TOKEN is scoped to THIS repository, not the repo
-          # being analyzed. Use a fine-grained PAT (Actions: Read) or a classic
-          # PAT with `repo` for private repositories.
+          # Preferred: a token with `actions: read` on the TARGET repo. The
+          # default GITHUB_TOKEN is scoped to this repository, so a private
+          # target repo needs a PAT here (fine-grained with Actions:Read, or
+          # classic with `repo`).
           GH_READ_TOKEN: ${{ secrets.GH_READ_TOKEN }}
+          # Fallback so a public target repo works with no extra setup. Still far
+          # better than anonymous: 5,000 API requests/hour instead of 60.
+          DEFAULT_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
 
@@ -77,13 +81,18 @@ jobs:
 
           if [ "${{ inputs.skip_github_check }}" = "true" ]; then
             ARGS+=(--skip-github-check)
-          else
-            if [ -z "${GH_READ_TOKEN:-}" ]; then
-              echo "::error::Secret GH_READ_TOKEN is required unless skip_github_check is true."
-              echo "::error::It needs 'actions: read' on ${{ inputs.owner }}/${{ inputs.repo }}."
-              exit 1
-            fi
+          elif [ -n "${GH_READ_TOKEN:-}" ]; then
+            echo "Using GH_READ_TOKEN for the GitHub existence check."
             ARGS+=(--github-token "$GH_READ_TOKEN")
+          else
+            # No dedicated token. Try the workflow's own GITHUB_TOKEN, which is
+            # enough to read a public repo's runs and carries the full
+            # authenticated rate limit. The script preflights access and exits
+            # with a clear error if it is not sufficient, so this can never
+            # silently misreport runs as deleted.
+            echo "::notice::GH_READ_TOKEN not set; falling back to GITHUB_TOKEN."
+            echo "::notice::Set GH_READ_TOKEN if ${{ inputs.owner }}/${{ inputs.repo }} is private."
+            ARGS+=(--github-token "$DEFAULT_TOKEN")
           fi
 
           [ -n "${{ inputs.start_time }}" ] && ARGS+=(--start-time "${{ inputs.start_time }}")
@@ -101,16 +110,27 @@ jobs:
             exit 0
           fi
 
+          CHECKED=$(jq -r '.github_checked // false' deleted-run-analysis/summary.json)
+          RUNS=$(jq -r '.stepsecurity_runs // 0' deleted-run-analysis/summary.json)
+
           {
             echo "## Deleted workflow run analysis"
             echo ""
+            if [ "$CHECKED" != "true" ]; then
+              # Without this the reader sees deleted_from_github: 0 and concludes
+              # "nothing was deleted", when in fact nothing was looked at.
+              echo "> **The GitHub diff did not run.** $RUNS run(s) were snapshotted from"
+              echo "> StepSecurity, but none were checked against GitHub, so this says"
+              echo "> nothing about whether any run was deleted."
+              echo ""
+            fi
             echo '```json'
             cat deleted-run-analysis/summary.json
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
           DELETED=$(jq -r '.deleted_from_github // 0' deleted-run-analysis/summary.json)
-          if [ "$DELETED" != "null" ] && [ "$DELETED" -gt 0 ] 2>/dev/null; then
+          if [ "$CHECKED" = "true" ] && [ "$DELETED" -gt 0 ] 2>/dev/null; then
             {
               echo ""
               echo "### :rotating_light: $DELETED run(s) deleted from GitHub"
