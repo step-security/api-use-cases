@@ -1,0 +1,131 @@
+name: Detect Deleted Workflow Runs
+
+on:
+  workflow_dispatch:
+    inputs:
+      owner:
+        description: 'GitHub organization/owner name'
+        required: true
+        type: string
+      repo:
+        description: 'Repository name'
+        required: true
+        type: string
+      start_time:
+        description: 'Window start: Unix epoch seconds or YYYY-MM-DD (default: 90 days ago, the API limit)'
+        required: false
+        type: string
+      end_time:
+        description: 'Window end: Unix epoch seconds or YYYY-MM-DD (default: now)'
+        required: false
+        type: string
+      min_run_id:
+        description: 'Only keep runs with id >= this value (optional)'
+        required: false
+        type: string
+      max_run_id:
+        description: 'Only keep runs with id <= this value (optional)'
+        required: false
+        type: string
+      skip_github_check:
+        description: 'Only snapshot StepSecurity metadata, skip the GitHub diff'
+        required: false
+        default: false
+        type: boolean
+
+permissions: {}
+
+jobs:
+  detect-deleted-runs:
+    permissions:
+      contents: read  # for actions/checkout to fetch code
+    runs-on: ubuntu-latest
+    steps:
+      - name: Harden the runner (Audit all outbound calls)
+        uses: step-security/harden-runner@e3f713f2d8f53843e71c69a996d56f51aa9adfb9 # v2.14.1
+        with:
+          egress-policy: audit
+
+      - name: Checkout repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - name: Make script executable
+        run: chmod +x scripts/detect_deleted_workflow_runs.sh
+
+      - name: Detect deleted workflow runs
+        env:
+          # StepSecurity API token.
+          API_KEY: ${{ secrets.API_KEY }}
+          # GitHub token with `actions: read` on the target repo. Needed because
+          # the default GITHUB_TOKEN is scoped to THIS repository, not the repo
+          # being analyzed. Use a fine-grained PAT (Actions: Read) or a classic
+          # PAT with `repo` for private repositories.
+          GH_READ_TOKEN: ${{ secrets.GH_READ_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "${API_KEY:-}" ]; then
+            echo "::error::Secret API_KEY is not set."
+            exit 1
+          fi
+
+          ARGS=(
+            --owner "${{ inputs.owner }}"
+            --repo  "${{ inputs.repo }}"
+            --token "$API_KEY"
+          )
+
+          if [ "${{ inputs.skip_github_check }}" = "true" ]; then
+            ARGS+=(--skip-github-check)
+          else
+            if [ -z "${GH_READ_TOKEN:-}" ]; then
+              echo "::error::Secret GH_READ_TOKEN is required unless skip_github_check is true."
+              echo "::error::It needs 'actions: read' on ${{ inputs.owner }}/${{ inputs.repo }}."
+              exit 1
+            fi
+            ARGS+=(--github-token "$GH_READ_TOKEN")
+          fi
+
+          [ -n "${{ inputs.start_time }}" ] && ARGS+=(--start-time "${{ inputs.start_time }}")
+          [ -n "${{ inputs.end_time }}"   ] && ARGS+=(--end-time   "${{ inputs.end_time }}")
+          [ -n "${{ inputs.min_run_id }}" ] && ARGS+=(--min-run-id "${{ inputs.min_run_id }}")
+          [ -n "${{ inputs.max_run_id }}" ] && ARGS+=(--max-run-id "${{ inputs.max_run_id }}")
+
+          ./scripts/detect_deleted_workflow_runs.sh "${ARGS[@]}"
+
+      - name: Summarize findings
+        if: always()
+        run: |
+          if [ ! -f deleted-run-analysis/summary.json ]; then
+            echo "No summary produced." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          {
+            echo "## Deleted workflow run analysis"
+            echo ""
+            echo '```json'
+            cat deleted-run-analysis/summary.json
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          DELETED=$(jq -r '.deleted_from_github // 0' deleted-run-analysis/summary.json)
+          if [ "$DELETED" != "null" ] && [ "$DELETED" -gt 0 ] 2>/dev/null; then
+            {
+              echo ""
+              echo "### :rotating_light: $DELETED run(s) deleted from GitHub"
+              echo ""
+              echo "| run_id | workflow | branch | actor | started |"
+              echo "|---|---|---|---|---|"
+              jq -r '.[] | "| \(.run_id) | \(.workflow_path // "?") | \(.head_branch // "?") | \(.actor // "?") | \(.started_at // "?") |"' \
+                deleted-run-analysis/deleted-runs.json
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Upload results as artifact
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: deleted-run-analysis-${{ inputs.owner }}-${{ inputs.repo }}
+          path: deleted-run-analysis/
+          retention-days: 30
